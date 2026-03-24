@@ -1,0 +1,184 @@
+@import "tailwindcss";
+
+/* Dark mode via .dark class on <html> */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens */
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+    'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+/* Base styles — must be in @layer base to not override utilities */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Fix native <select> option background in dark mode */
+  .dark select option {
+    background-color: #18181b;
+    color: #f4f4f5;
+  }
+}
+
+/* Custom scrollbar — thin, OS-native feel, theme-aware */
+@layer components {
+  /* Global scrollbar styling for light mode */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #d4d4d8 transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 9999px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #a1a1aa, #71717a);
+    border-radius: 9999px;
+    transition: background 0.2s ease;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #71717a, #52525b);
+  }
+
+  /* Dark mode scrollbar styling */
+  .dark,
+  .dark * {
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  }
+
+  .dark *::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.1));
+  }
+
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.15));
+  }
+
+  /* Special scrollbar for success/verification contexts - emerald theme */
+  .verification-steps-scroll,
+  .success-scroll {
+    scrollbar-color: #10b981 transparent;
+  }
+
+  .verification-steps-scroll::-webkit-scrollbar-thumb,
+  .success-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #34d399, #10b981);
+  }
+
+  .verification-steps-scroll::-webkit-scrollbar-thumb:hover,
+  .success-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #10b981, #059669);
+  }
+
+  .dark .verification-steps-scroll,
+  .dark .success-scroll {
+    scrollbar-color: #34d399 transparent;
+  }
+
+  .dark .verification-steps-scroll::-webkit-scrollbar-thumb,
+  .dark .success-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #6ee7b7, #34d399);
+  }
+
+  .dark .verification-steps-scroll::-webkit-scrollbar-thumb:hover,
+  .dark .success-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #34d399, #10b981);
+  }
+
+  /* Blue themed scrollbar for info contexts */
+  .info-scroll {
+    scrollbar-color: #3b82f6 transparent;
+  }
+
+  .info-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #60a5fa, #3b82f6);
+  }
+
+  .info-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #3b82f6, #2563eb);
+  }
+
+  .dark .info-scroll {
+    scrollbar-color: #60a5fa transparent;
+  }
+
+  .dark .info-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #93c5fd, #60a5fa);
+  }
+
+  .dark .info-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #60a5fa, #3b82f6);
+  }
+
+  /* Amber themed scrollbar for warning contexts */
+  .warning-scroll {
+    scrollbar-color: #f59e0b transparent;
+  }
+
+  .warning-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #fbbf24, #f59e0b);
+  }
+
+  .warning-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #f59e0b, #d97706);
+  }
+
+  .dark .warning-scroll {
+    scrollbar-color: #fbbf24 transparent;
+  }
+
+  .dark .warning-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #fcd34d, #fbbf24);
+  }
+
+  .dark .warning-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #fbbf24, #f59e0b);
+  }
+
+  /* Red themed scrollbar for error/danger contexts */
+  .error-scroll,
+  .danger-scroll {
+    scrollbar-color: #ef4444 transparent;
+  }
+
+  .error-scroll::-webkit-scrollbar-thumb,
+  .danger-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #f87171, #ef4444);
+  }
+
+  .error-scroll::-webkit-scrollbar-thumb:hover,
+  .danger-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #ef4444, #dc2626);
+  }
+
+  .dark .error-scroll,
+  .dark .danger-scroll {
+    scrollbar-color: #f87171 transparent;
+  }
+
+  .dark .error-scroll::-webkit-scrollbar-thumb,
+  .dark .danger-scroll::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #fca5a5, #f87171);
+  }
+
+  .dark .error-scroll::-webkit-scrollbar-thumb:hover,
+  .dark .danger-scroll::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(to bottom, #f87171, #ef4444);
+  }
+}
