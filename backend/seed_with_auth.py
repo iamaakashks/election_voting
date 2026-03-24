@@ -20,7 +20,7 @@ def seed_data():
     # 2 branches × 4 sections = 8 combinations
     # 5000 / 8 = 625 students per branch-section combination
     
-    students_per_combination = 625
+    students_per_combination = 60
     
     # First names and last names for realistic names
     first_names = [
