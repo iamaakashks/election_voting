@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { adminAPI, electionsAPI } from '../services/api';
+import { adminAPI } from '../services/api';
 import {
   Plus,
   Users,
@@ -25,7 +25,6 @@ import {
   PieChart,
   SquareStop,
   BookOpen,
-  FileClock,
   Vote,
   Link2,
   ThumbsDown
@@ -80,6 +79,13 @@ interface GlobalRegistrationWindow {
   start_time: string;
   end_time: string;
   time_remaining: number;
+}
+
+type AdminTab = 'global' | 'election' | 'candidates' | 'students' | 'all-candidates' | 'live-ledger';
+
+interface AdminProps {
+  activeTab?: AdminTab;
+  onActiveTabChange?: (tab: AdminTab) => void;
 }
 
 interface SectionOverride {
@@ -140,17 +146,6 @@ interface LiveLedgerData {
   ledger: LedgerVote[];
   transparency_note: string;
   timezone: string;
-}
-
-interface AuditLogEntry {
-  id: number;
-  timestamp_ist: string;
-  action: string;
-  entity_type: string;
-  entity_id: number | null;
-  user_email: string | null;
-  old_values: Record<string, any> | null;
-  new_values: Record<string, any> | null;
 }
 
 type SelectOption = string | { value: string; label: string };
@@ -245,14 +240,14 @@ const isTransportError = (error: unknown): boolean => {
   return false;
 };
 
-const Admin: React.FC = () => {
+const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveTabChange }) => {
   const [branch, setBranch] = useState('CSE');
   const [section, setSection] = useState('A');
   const [duration, setDuration] = useState(60);
   const [durationPreset, setDurationPreset] = useState('60');
   const [electionDuration, setElectionDuration] = useState(15);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'global' | 'election' | 'candidates' | 'students' | 'all-candidates' | 'live-ledger' | 'audit-log'>('global');
+  const [activeTab, setActiveTab] = useState<AdminTab>(controlledActiveTab ?? 'global');
   const [elections, setElections] = useState<Election[]>([]);
   const [pendingCandidates, setPendingCandidates] = useState<Candidate[]>([]);
   const [windowCandidates, setWindowCandidates] = useState<Candidate[]>([]);
@@ -288,11 +283,18 @@ const Admin: React.FC = () => {
   const [rejectCandidateId, setRejectCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [submittingReject, setSubmittingReject] = useState(false);
+
+  useEffect(() => {
+    if (controlledActiveTab && controlledActiveTab !== activeTab) {
+      setActiveTab(controlledActiveTab);
+    }
+  }, [controlledActiveTab, activeTab]);
+
+  useEffect(() => {
+    onActiveTabChange?.(activeTab);
+  }, [activeTab, onActiveTabChange]);
   const [liveLedgerData, setLiveLedgerData] = useState<LiveLedgerData | null>(null);
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
-  const [selectedElectionForLedger, setSelectedElectionForLedger] = useState<number | null>(null);
   const [ledgerLoading, setLedgerLoading] = useState(false);
-  const [auditLogsLoading, setAuditLogsLoading] = useState(false);
   const STUDENTS_PER_PAGE = 25;
 
   const fetchElections = useCallback(async () => {
@@ -316,26 +318,13 @@ const Admin: React.FC = () => {
   const fetchLiveLedger = useCallback(async (election_id: number) => {
     setLedgerLoading(true);
     try {
-      const data = await electionsAPI.getLiveLedger(election_id);
+      const data = await adminAPI.getLiveLedger(election_id);
       setLiveLedgerData(data);
     } catch (err) {
       console.error('Failed to fetch live ledger', err);
       setLiveLedgerData(null);
     } finally {
       setLedgerLoading(false);
-    }
-  }, []);
-
-  const fetchAuditLogs = useCallback(async () => {
-    setAuditLogsLoading(true);
-    try {
-      const data = await adminAPI.getAuditLogs(200);
-      setAuditLogs(data.audit_logs || []);
-    } catch (err) {
-      console.error('Failed to fetch audit logs', err);
-      setAuditLogs([]);
-    } finally {
-      setAuditLogsLoading(false);
     }
   }, []);
 
@@ -398,14 +387,26 @@ const Admin: React.FC = () => {
     // Refresh relevant data based on message type
     if (message.type === 'vote_cast') {
       fetchElections();
+      if (activeTab === 'live-ledger') {
+        const activeElectionId = typeof message.election_id === 'number' ? message.election_id : liveLedgerData?.election.id;
+        if (activeElectionId) {
+          fetchLiveLedger(activeElectionId);
+        }
+      }
     } else if (message.type === 'election_started' || message.type === 'election_stopped') {
       fetchElections();
       fetchGlobalRegistrationStatus();
+      if (activeTab === 'live-ledger') {
+        const activeElectionId = typeof message.election_id === 'number' ? message.election_id : liveLedgerData?.election.id;
+        if (activeElectionId) {
+          fetchLiveLedger(activeElectionId);
+        }
+      }
     } else if (message.type === 'candidate_approved' || message.type === 'candidate_rejected' || message.type === 'candidate_registered') {
       fetchPendingCandidates();
       fetchSectionWiseCandidates();
     }
-  }, [fetchElections, fetchGlobalRegistrationStatus, fetchPendingCandidates, fetchSectionWiseCandidates]);
+  }, [activeTab, fetchElections, fetchGlobalRegistrationStatus, fetchLiveLedger, fetchPendingCandidates, fetchSectionWiseCandidates, liveLedgerData?.election.id]);
 
   const { isConnected: adminWsConnected } = useWebSocket({
     isAdmin: true,
@@ -479,14 +480,12 @@ const Admin: React.FC = () => {
       // Load most recent active election for ledger
       const activeElection = elections.find(e => e.status === 'active');
       if (activeElection) {
-        setSelectedElectionForLedger(activeElection.id);
         fetchLiveLedger(activeElection.id);
+      } else {
+        setLiveLedgerData(null);
       }
     }
-    if (activeTab === 'audit-log') {
-      fetchAuditLogs();
-    }
-  }, [activeTab, fetchGlobalRegistrationStatus, fetchSectionOverrides, fetchSectionWiseCandidates, fetchStudents, elections, fetchLiveLedger, fetchAuditLogs]);
+  }, [activeTab, fetchGlobalRegistrationStatus, fetchSectionOverrides, fetchSectionWiseCandidates, fetchStudents, elections, fetchLiveLedger]);
 
   // Polling fallback when WebSocket is unavailable
   useEffect(() => {
@@ -503,13 +502,23 @@ const Admin: React.FC = () => {
       if (activeTab === 'all-candidates') {
         fetchSectionWiseCandidates();
       }
+      if (activeTab === 'live-ledger') {
+        const activeElection = elections.find(e => e.status === 'active');
+        if (activeElection) {
+          fetchLiveLedger(activeElection.id);
+        } else {
+          setLiveLedgerData(null);
+        }
+      }
     }, 5000);
     return () => clearInterval(timer);
   }, [
     adminWsConnected,
     activeTab,
+    elections,
     fetchElections,
     fetchGlobalRegistrationStatus,
+    fetchLiveLedger,
     fetchSectionOverrides,
     fetchPendingCandidates,
     fetchSectionWiseCandidates
@@ -984,7 +993,6 @@ const Admin: React.FC = () => {
             <option value="candidates">Approvals</option>
             <option value="students">Students Directory</option>
             <option value="live-ledger">Live Ledger</option>
-            <option value="audit-log">Audit Log</option>
           </select>
           <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-zinc-500 dark:text-zinc-400">
             <ChevronDown className="h-5 w-5" />
@@ -1000,8 +1008,7 @@ const Admin: React.FC = () => {
           { id: 'election', label: 'Voting Instances', icon: CalendarDays },
           { id: 'candidates', label: 'Approvals', icon: ShieldCheck, badge: pendingCandidates.length },
           { id: 'students', label: 'Students Directory', icon: GraduationCap },
-          { id: 'live-ledger', label: 'Live Ledger', icon: BookOpen },
-          { id: 'audit-log', label: 'Audit Log', icon: FileClock }
+          { id: 'live-ledger', label: 'Live Ledger', icon: BookOpen }
         ].map(tab => (
           <button
             key={tab.id}
@@ -1939,121 +1946,6 @@ const Admin: React.FC = () => {
                           </div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* Audit Log Tab */}
-            {activeTab === 'audit-log' && (
-              <>
-                <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/50 dark:bg-transparent">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 flex items-center justify-center">
-                        <FileClock className="w-5 h-5 text-violet-600 dark:text-violet-400" />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Audit Trail</h3>
-                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Complete event history for transparency and accountability.</p>
-                      </div>
-                    </div>
-                    {auditLogs.length > 0 && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-black uppercase tracking-widest bg-violet-100 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400 px-3 py-1 rounded-md">
-                          {auditLogs.length} Events
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="p-6">
-                  {auditLogsLoading ? (
-                    <div className="flex items-center justify-center py-32">
-                      <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
-                    </div>
-                  ) : auditLogs.length === 0 ? (
-                    <div className="text-center py-32">
-                      <div className="inline-flex flex-col items-center text-zinc-400 dark:text-zinc-600">
-                        <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center mb-4">
-                          <FileClock className="w-8 h-8 opacity-50" />
-                        </div>
-                        <p className="text-base font-bold text-zinc-500 dark:text-zinc-400">No audit logs found</p>
-                        <p className="text-sm font-medium text-zinc-400 dark:text-zinc-500 mt-1">System events will be recorded here</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {auditLogs.map((log) => (
-                        <div key={log.id} className="rounded-xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#09090B] p-4 hover:border-zinc-300 dark:hover:border-white/20 transition-all">
-                          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                            <div className="flex items-start gap-3">
-                              <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${
-                                log.action === 'VOTE' ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/20' :
-                                log.action === 'START' ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' :
-                                log.action === 'APPROVE' || log.action === 'CREATE' ? 'bg-violet-50 dark:bg-violet-500/10 border-violet-200 dark:border-violet-500/20' :
-                                log.action === 'REJECT' || log.action === 'DELETE' ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20' :
-                                'bg-zinc-50 dark:bg-white/5 border-zinc-200 dark:border-white/10'
-                              }`}>
-                                {log.action === 'VOTE' ? <Vote className="w-5 h-5 text-blue-600 dark:text-blue-400" /> :
-                                 log.action === 'START' ? <CalendarDays className="w-5 h-5 text-emerald-600 dark:text-emerald-400" /> :
-                                 log.action === 'APPROVE' ? <CheckCircle2 className="w-5 h-5 text-violet-600 dark:text-violet-400" /> :
-                                 log.action === 'REJECT' ? <XCircle className="w-5 h-5 text-red-600 dark:text-red-400" /> :
-                                 <Activity className="w-5 h-5 text-zinc-600 dark:text-zinc-400" />}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${
-                                    log.action === 'VOTE' ? 'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400' :
-                                    log.action === 'START' ? 'bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400' :
-                                    log.action === 'APPROVE' || log.action === 'CREATE' ? 'bg-violet-100 dark:bg-violet-500/20 text-violet-700 dark:text-violet-400' :
-                                    log.action === 'REJECT' || log.action === 'DELETE' ? 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400' :
-                                    'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400'
-                                  }`}>
-                                    {log.action}
-                                  </span>
-                                  <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300">{log.entity_type}</span>
-                                  {log.entity_id && (
-                                    <span className="text-xs font-mono text-zinc-500 dark:text-zinc-400">#{log.entity_id}</span>
-                                  )}
-                                </div>
-                                <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                                  {log.user_email && (
-                                    <span className="font-medium">By: {log.user_email}</span>
-                                  )}
-                                </p>
-                                <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 mt-1">
-                                  {log.timestamp_ist}
-                                </p>
-                              </div>
-                            </div>
-
-                            {/* Show old/new values if available */}
-                            {(log.old_values || log.new_values) && (
-                              <div className="lg:text-right">
-                                {log.new_values && (
-                                  <div className="text-xs">
-                                    <span className="text-zinc-500 dark:text-zinc-400">New: </span>
-                                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
-                                      {JSON.stringify(log.new_values).slice(0, 100)}{JSON.stringify(log.new_values).length > 100 ? '...' : ''}
-                                    </span>
-                                  </div>
-                                )}
-                                {log.old_values && (
-                                  <div className="text-xs mt-1">
-                                    <span className="text-zinc-500 dark:text-zinc-400">Old: </span>
-                                    <span className="font-mono text-red-600 dark:text-red-400">
-                                      {JSON.stringify(log.old_values).slice(0, 100)}{JSON.stringify(log.old_values).length > 100 ? '...' : ''}
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
                     </div>
                   )}
                 </div>

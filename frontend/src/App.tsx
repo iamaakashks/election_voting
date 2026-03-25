@@ -1,14 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import Dashboard from './components/Dashboard';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import Admin from './components/Admin';
 import Login from './components/Login';
 import StudentProfile from './components/StudentProfile';
 import { ThemeProvider, useTheme } from './components/ThemeProvider';
-import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, DoorOpen, Users, CalendarDays, Shield as ShieldIcon, GraduationCap, BookOpen, FileClock } from 'lucide-react';
+import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, DoorOpen, Users, CalendarDays, Shield as ShieldIcon, GraduationCap, BookOpen, History, Vote as VoteIcon } from 'lucide-react';
 import Tooltip from './components/Tooltip';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const ADMIN_TABS = ['global', 'election', 'candidates', 'students', 'all-candidates', 'live-ledger'] as const;
+const STUDENT_TABS = ['portal', 'history', 'live-ledger'] as const;
+type AdminTab = (typeof ADMIN_TABS)[number];
+type StudentTab = (typeof STUDENT_TABS)[number];
+const ADMIN_TAB_STORAGE_KEY = 'nie_admin_active_tab';
+const STUDENT_TAB_STORAGE_KEY = 'nie_student_active_tab';
+
+const getStoredTab = <T extends string>(storageKey: string, allowedTabs: readonly T[], fallback: T): T => {
+  if (typeof window === 'undefined') return fallback;
+  const stored = window.localStorage.getItem(storageKey);
+  return stored && allowedTabs.includes(stored as T) ? (stored as T) : fallback;
+};
 
 // Check if user has valid session
 const checkSession = async (): Promise<any | null> => {
@@ -71,16 +82,41 @@ const ThemeToggle = () => {
   );
 };
 
-const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false, onNavigateToTab }: { userType: 'student' | 'admin' | null, onLogout?: () => void, onClick?: () => void, collapsed?: boolean, onNavigateToTab?: (tab: string) => void }) => {
+const NavigationLinks = ({
+  userType,
+  onLogout,
+  onClick,
+  collapsed = false,
+  onNavigateToAdminTab,
+  onNavigateToStudentTab,
+  activeAdminTab,
+  activeStudentTab
+}: {
+  userType: 'student' | 'admin' | null,
+  onLogout?: () => void,
+  onClick?: () => void,
+  collapsed?: boolean,
+  onNavigateToAdminTab?: (tab: AdminTab) => void,
+  onNavigateToStudentTab?: (tab: StudentTab) => void,
+  activeAdminTab?: AdminTab | null,
+  activeStudentTab?: StudentTab | null
+}) => {
   const linkClass = (active: boolean) => `group flex items-center gap-3 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
     active
       ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
       : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white'
   } ${collapsed ? 'lg:justify-center lg:px-3' : ''}`;
 
-  const handleAdminNav = (tab: string) => {
-    if (onNavigateToTab) {
-      onNavigateToTab(tab);
+  const handleAdminNav = (tab: AdminTab) => {
+    if (onNavigateToAdminTab) {
+      onNavigateToAdminTab(tab);
+      onClick?.();
+    }
+  };
+
+  const handleStudentNav = (tab: StudentTab) => {
+    if (onNavigateToStudentTab) {
+      onNavigateToStudentTab(tab);
       onClick?.();
     }
   };
@@ -88,45 +124,51 @@ const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false, onNav
   return (
     <nav className="space-y-2 mt-6 px-4">
       <h3 className={`px-4 text-[11px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest mb-3 ${collapsed ? 'lg:hidden' : ''}`}>Navigation</h3>
-      {userType === 'student' && (
-        <button onClick={onClick} className={linkClass(true)}>
-          <ShieldCheck className="w-4 h-4 text-blue-600" />
-          <span className={collapsed ? 'lg:hidden' : ''}>Voter Portal</span>
-        </button>
-      )}
-      {userType === 'admin' && onNavigateToTab && (
+      {userType === 'student' && onNavigateToStudentTab && (
         <>
-          <button onClick={() => handleAdminNav('global')} className={linkClass(false)}>
-            <DoorOpen className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Registration</span>
+          <button onClick={() => handleStudentNav('portal')} className={linkClass(activeStudentTab === 'portal')}>
+            <VoteIcon className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Voter Portal</span>
           </button>
-          <button onClick={() => handleAdminNav('all-candidates')} className={linkClass(false)}>
-            <Users className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>All Candidates</span>
+          <button onClick={() => handleStudentNav('history')} className={linkClass(activeStudentTab === 'history')}>
+            <History className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Election History</span>
           </button>
-          <button onClick={() => handleAdminNav('election')} className={linkClass(false)}>
-            <CalendarDays className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Elections</span>
-          </button>
-          <button onClick={() => handleAdminNav('candidates')} className={linkClass(false)}>
-            <ShieldIcon className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Approvals</span>
-          </button>
-          <button onClick={() => handleAdminNav('students')} className={linkClass(false)}>
-            <GraduationCap className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Students</span>
-          </button>
-          <button onClick={() => handleAdminNav('live-ledger')} className={linkClass(false)}>
+          <button onClick={() => handleStudentNav('live-ledger')} className={linkClass(activeStudentTab === 'live-ledger')}>
             <BookOpen className="w-4 h-4" />
             <span className={collapsed ? 'lg:hidden' : ''}>Live Ledger</span>
           </button>
-          <button onClick={() => handleAdminNav('audit-log')} className={linkClass(false)}>
-            <FileClock className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Audit Log</span>
+        </>
+      )}
+      {userType === 'admin' && onNavigateToAdminTab && (
+        <>
+          <button onClick={() => handleAdminNav('global')} className={linkClass(activeAdminTab === 'global')}>
+            <DoorOpen className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Candidate Registration</span>
+          </button>
+          <button onClick={() => handleAdminNav('all-candidates')} className={linkClass(activeAdminTab === 'all-candidates')}>
+            <Users className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>All Candidates</span>
+          </button>
+          <button onClick={() => handleAdminNav('election')} className={linkClass(activeAdminTab === 'election')}>
+            <CalendarDays className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Voting Instances</span>
+          </button>
+          <button onClick={() => handleAdminNav('candidates')} className={linkClass(activeAdminTab === 'candidates')}>
+            <ShieldIcon className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Approvals</span>
+          </button>
+          <button onClick={() => handleAdminNav('students')} className={linkClass(activeAdminTab === 'students')}>
+            <GraduationCap className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Students Directory</span>
+          </button>
+          <button onClick={() => handleAdminNav('live-ledger')} className={linkClass(activeAdminTab === 'live-ledger')}>
+            <BookOpen className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Live Ledger</span>
           </button>
         </>
       )}
-      {userType === 'admin' && !onNavigateToTab && (
+      {userType === 'admin' && !onNavigateToAdminTab && (
         <button onClick={onClick} className={linkClass(true)}>
           <LayoutGrid className="w-4 h-4 text-blue-600" />
           <span className={collapsed ? 'lg:hidden' : ''}>Admin Panel</span>
@@ -142,13 +184,45 @@ const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false, onNav
   );
 };
 
-const Layout = ({ children, userType, onLogout }: { children: React.ReactNode, userType: 'student' | 'admin' | null, onLogout?: () => void }) => {
+const Layout = ({
+  children,
+  userType,
+  onLogout,
+  currentAdminTab,
+  currentStudentTab,
+  onNavigateToAdminTab,
+  onNavigateToStudentTab
+}: {
+  children: React.ReactNode,
+  userType: 'student' | 'admin' | null,
+  onLogout?: () => void,
+  currentAdminTab?: AdminTab | null,
+  currentStudentTab?: StudentTab | null,
+  onNavigateToAdminTab?: (tab: AdminTab) => void,
+  onNavigateToStudentTab?: (tab: StudentTab) => void
+}) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const location = useLocation();
+  const navigate = useNavigate();
 
   if (!userType) {
     return <>{children}</>;
   }
+
+  const handleSidebarTabChange = (tab: AdminTab) => {
+    onNavigateToAdminTab?.(tab);
+    if (location.pathname !== '/admin') {
+      navigate('/admin');
+    }
+  };
+
+  const handleStudentSidebarTabChange = (tab: StudentTab) => {
+    onNavigateToStudentTab?.(tab);
+    if (location.pathname !== '/') {
+      navigate('/');
+    }
+  };
 
   return (
     <div className="flex h-screen bg-[#F8FAFC] dark:bg-[#09090B] overflow-hidden font-sans text-zinc-900 dark:text-zinc-100 transition-colors duration-300 selection:bg-blue-500/30">
@@ -181,7 +255,16 @@ const Layout = ({ children, userType, onLogout }: { children: React.ReactNode, u
         </div>
 
         <div className="flex-1 overflow-y-auto py-2">
-          <NavigationLinks userType={userType} onLogout={onLogout} onClick={() => setMobileMenuOpen(false)} collapsed={!desktopSidebarOpen} />
+          <NavigationLinks
+            userType={userType}
+            onLogout={onLogout}
+            onClick={() => setMobileMenuOpen(false)}
+            collapsed={!desktopSidebarOpen}
+            onNavigateToAdminTab={userType === 'admin' ? handleSidebarTabChange : undefined}
+            onNavigateToStudentTab={userType === 'student' ? handleStudentSidebarTabChange : undefined}
+            activeAdminTab={currentAdminTab}
+            activeStudentTab={currentStudentTab}
+          />
         </div>
 
         {/* User Card */}
@@ -249,6 +332,8 @@ function App() {
   const [userType, setUserType] = useState<'student' | 'admin' | null>(null);
   const [studentUser, setStudentUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [adminActiveTab, setAdminActiveTab] = useState<AdminTab>(() => getStoredTab(ADMIN_TAB_STORAGE_KEY, ADMIN_TABS, 'global'));
+  const [studentActiveTab, setStudentActiveTab] = useState<StudentTab>(() => getStoredTab(STUDENT_TAB_STORAGE_KEY, STUDENT_TABS, 'portal'));
 
   // Check for existing session on mount
   useEffect(() => {
@@ -280,7 +365,17 @@ function App() {
     localStorage.removeItem('user_type');
     setUserType(null);
     setStudentUser(null);
+    setAdminActiveTab('global');
+    setStudentActiveTab('portal');
   };
+
+  useEffect(() => {
+    localStorage.setItem(ADMIN_TAB_STORAGE_KEY, adminActiveTab);
+  }, [adminActiveTab]);
+
+  useEffect(() => {
+    localStorage.setItem(STUDENT_TAB_STORAGE_KEY, studentActiveTab);
+  }, [studentActiveTab]);
 
   // Show loading state while checking session
   if (isLoading) {
@@ -307,10 +402,27 @@ function App() {
   return (
     <ThemeProvider defaultTheme="system" storageKey="app-theme">
       <Router>
-        <Layout userType={userType} onLogout={handleLogout}>
+        <Layout
+          userType={userType}
+          onLogout={handleLogout}
+          currentAdminTab={adminActiveTab}
+          currentStudentTab={studentActiveTab}
+          onNavigateToAdminTab={setAdminActiveTab}
+          onNavigateToStudentTab={setStudentActiveTab}
+        >
           <Routes>
-            <Route path="/" element={userType === 'student' && studentUser ? <StudentProfile student={studentUser} onLogout={handleLogout} /> : <Navigate to="/admin" replace />} />
-            <Route path="/admin" element={userType === 'admin' ? <Admin /> : <Navigate to="/" replace />} />
+            <Route
+              path="/"
+              element={userType === 'student' && studentUser ? (
+                <StudentProfile
+                  student={studentUser}
+                  onLogout={handleLogout}
+                  activeTab={studentActiveTab}
+                  onActiveTabChange={setStudentActiveTab}
+                />
+              ) : <Navigate to="/admin" replace />}
+            />
+            <Route path="/admin" element={userType === 'admin' ? <Admin activeTab={adminActiveTab} onActiveTabChange={setAdminActiveTab} /> : <Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Layout>

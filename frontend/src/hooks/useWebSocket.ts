@@ -35,6 +35,23 @@ const normalizeApiBaseUrl = (rawUrl: string): string => {
   }
 };
 
+const normalizeWebSocketBaseUrl = (rawUrl: string): string => {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1';
+    }
+    if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
+    if (parsed.protocol === 'http:') parsed.protocol = 'ws:';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return rawUrl
+      .replace(/^https:\/\//, 'wss://')
+      .replace(/^http:\/\//, 'ws://')
+      .replace(/\/$/, '');
+  }
+};
+
 const isWebSocketMessage = (value: unknown): value is WebSocketMessage => {
   if (typeof value !== 'object' || value === null) return false;
   const maybeMessage = value as { type?: unknown };
@@ -76,18 +93,24 @@ export const useWebSocket = ({
   }, []);
 
   const getWebSocketUrl = useCallback(() => {
-    const apiBaseUrl = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000');
-    let baseUrl = 'ws://127.0.0.1:8000';
-    try {
-      const parsed = new URL(apiBaseUrl);
-      const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-      const basePath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, '');
-      baseUrl = `${wsProtocol}//${parsed.host}${basePath}`;
-    } catch {
-      baseUrl = apiBaseUrl.startsWith('https://')
-        ? apiBaseUrl.replace('https://', 'wss://')
-        : apiBaseUrl.replace('http://', 'ws://');
-      baseUrl = baseUrl.replace(/\/$/, '');
+    const explicitWsBaseUrl = import.meta.env.VITE_WS_BASE_URL?.trim();
+    let baseUrl = explicitWsBaseUrl
+      ? normalizeWebSocketBaseUrl(explicitWsBaseUrl)
+      : 'ws://127.0.0.1:8000';
+
+    if (!explicitWsBaseUrl) {
+      const apiBaseUrl = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000');
+      try {
+        const parsed = new URL(apiBaseUrl);
+        const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+        const basePath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, '');
+        baseUrl = `${wsProtocol}//${parsed.host}${basePath}`;
+      } catch {
+        baseUrl = apiBaseUrl.startsWith('https://')
+          ? apiBaseUrl.replace('https://', 'wss://')
+          : apiBaseUrl.replace('http://', 'ws://');
+        baseUrl = baseUrl.replace(/\/$/, '');
+      }
     }
     if (isAdmin) {
       return `${baseUrl}/ws/admin`;

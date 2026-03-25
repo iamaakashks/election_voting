@@ -6,11 +6,12 @@ import {
   Candidate,
   Election,
   CandidateRegistrationStatusResponse,
+  LiveLedgerResponse,
   VoteReceiptVerificationResponse,
   VoteReceiptVerificationStep,
   VoteReceiptVerificationSummary,
 } from '../services/api';
-import { Vote, Users, Timer, AlertCircle, CheckCircle, FileText, XCircle, LogOut, User, ShieldAlert, KeyRound, ThumbsDown, ClipboardCopy, ShieldCheck, Hash, Link2, Lock, EyeOff, Database } from 'lucide-react';
+import { Vote, Users, Timer, AlertCircle, CheckCircle, FileText, XCircle, LogOut, User, ShieldAlert, KeyRound, ThumbsDown, ClipboardCopy, ShieldCheck, Hash, Link2, Lock, EyeOff, Database, History, BookOpen, RefreshCw, CalendarDays } from 'lucide-react';
 import ChangePasswordModal from './ChangePasswordModal';
 import AlertModal, { Modal } from './AlertModal';
 import Tooltip from './Tooltip';
@@ -43,6 +44,36 @@ interface GlobalRegistrationWindow {
 interface StudentProfileProps {
   student: Student;
   onLogout: () => void;
+  activeTab?: StudentViewTab;
+  onActiveTabChange?: (tab: StudentViewTab) => void;
+}
+
+type StudentViewTab = 'portal' | 'history' | 'live-ledger';
+
+interface HistoryElection {
+  id: number;
+  branch: string;
+  section: string;
+  start_time: string;
+  end_time: string;
+  is_active: boolean;
+  status: 'active' | 'completed' | 'scheduled';
+}
+
+interface ElectionHistoryResults {
+  election: {
+    id: number;
+    branch: string;
+    section: string;
+    total_votes: number;
+  };
+  results: Array<{
+    candidate_id: number;
+    name: string;
+    usn: string;
+    votes: number;
+    percentage: number;
+  }>;
 }
 
 const getApiErrorMessage = (error: unknown, fallback: string): string => {
@@ -86,7 +117,7 @@ const isTransportError = (error: unknown): boolean => {
   return false;
 };
 
-const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) => {
+const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, activeTab = 'portal', onActiveTabChange }) => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [election, setElection] = useState<Election | null>(null);
   const [voted, setVoted] = useState(student.has_voted);
@@ -108,6 +139,20 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
   const [showVerificationSteps, setShowVerificationSteps] = useState(false);
   const [verificationSummary, setVerificationSummary] = useState<VoteReceiptVerificationSummary | null>(null);
   const [lastVerificationResult, setLastVerificationResult] = useState<VoteReceiptVerificationResponse | null>(null);
+  const historySelectionStorageKey = `student_history_election_${student.usn}`;
+  const [historyElections, setHistoryElections] = useState<HistoryElection[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyResultsLoading, setHistoryResultsLoading] = useState(false);
+  const [historyResults, setHistoryResults] = useState<ElectionHistoryResults | null>(null);
+  const [selectedHistoryElectionId, setSelectedHistoryElectionId] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const stored = window.localStorage.getItem(`student_history_election_${student.usn}`);
+    if (!stored) return null;
+    const parsed = Number(stored);
+    return Number.isFinite(parsed) ? parsed : null;
+  });
+  const [liveLedgerData, setLiveLedgerData] = useState<LiveLedgerResponse | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
   const [candidateRegistrationStatus, setCandidateRegistrationStatus] = useState<CandidateRegistrationStatusResponse>({
     is_registered: false,
     status: 'not_registered',
@@ -125,6 +170,10 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
   } | null>(null);
 
   const latestReceiptStorageKey = `vote_receipt_${student.usn}_latest`;
+
+  useEffect(() => {
+    onActiveTabChange?.(activeTab);
+  }, [activeTab, onActiveTabChange]);
 
   const formatDateTime = (isoDate: string) => {
     const date = new Date(normalizeApiTimestamp(isoDate));
@@ -204,6 +253,69 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
     }
   }, [student.branch, student.section]);
 
+  const fetchElectionHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const data = await adminAPI.listElections();
+      const filtered = ((data.elections || []) as HistoryElection[])
+        .filter((item) => item.branch === student.branch && item.section === student.section)
+        .sort((a, b) => new Date(b.end_time).getTime() - new Date(a.end_time).getTime());
+
+      setHistoryElections(filtered);
+      setSelectedHistoryElectionId((previous) => {
+        if (previous && filtered.some((item) => item.id === previous)) {
+          return previous;
+        }
+        return filtered[0]?.id ?? null;
+      });
+    } catch (err: unknown) {
+      console.error('Failed to fetch election history:', err);
+      setHistoryElections([]);
+      setSelectedHistoryElectionId(null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [student.branch, student.section]);
+
+  const fetchHistoryResults = useCallback(async (electionId: number) => {
+    setHistoryResultsLoading(true);
+    try {
+      const data = await adminAPI.getElectionResults(electionId);
+      setHistoryResults({
+        election: data.election,
+        results: [...(data.results || [])].sort((a, b) => b.votes - a.votes)
+      });
+    } catch (err: unknown) {
+      console.error('Failed to fetch election results:', err);
+      setHistoryResults(null);
+    } finally {
+      setHistoryResultsLoading(false);
+    }
+  }, []);
+
+  const fetchLatestLiveLedger = useCallback(async () => {
+    setLedgerLoading(true);
+    try {
+      const data = await adminAPI.listElections();
+      const activeElection = ((data.elections || []) as HistoryElection[])
+        .filter((item) => item.status === 'active')
+        .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())[0];
+
+      if (!activeElection) {
+        setLiveLedgerData(null);
+        return;
+      }
+
+      const ledger = await adminAPI.getLiveLedger(activeElection.id);
+      setLiveLedgerData(ledger);
+    } catch (err: unknown) {
+      console.error('Failed to fetch live ledger:', err);
+      setLiveLedgerData(null);
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, []);
+
   // WebSocket for real-time updates
   const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
     console.log('Student received WebSocket message:', message);
@@ -217,8 +329,11 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
     ) {
       fetchActiveElection();
       fetchCandidateRegistrationStatus();
+      if (activeTab === 'history') {
+        fetchElectionHistory();
+      }
     }
-  }, [fetchActiveElection, fetchCandidateRegistrationStatus]);
+  }, [activeTab, fetchActiveElection, fetchCandidateRegistrationStatus, fetchElectionHistory]);
 
   const { isConnected: wsConnected } = useWebSocket({
     electionId: election?.id,
@@ -252,6 +367,36 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
     }, 5000);
     return () => clearInterval(timer);
   }, [wsConnected, fetchActiveElection, fetchWindowStatus, fetchGlobalRegistrationStatus, fetchCandidateRegistrationStatus]);
+
+  useEffect(() => {
+    if (activeTab !== 'history') return;
+    fetchElectionHistory();
+  }, [activeTab, fetchElectionHistory]);
+
+  useEffect(() => {
+    if (activeTab !== 'history' || !selectedHistoryElectionId) {
+      setHistoryResults(null);
+      return;
+    }
+    fetchHistoryResults(selectedHistoryElectionId);
+  }, [activeTab, selectedHistoryElectionId, fetchHistoryResults]);
+
+  useEffect(() => {
+    if (selectedHistoryElectionId === null) {
+      localStorage.removeItem(historySelectionStorageKey);
+      return;
+    }
+    localStorage.setItem(historySelectionStorageKey, String(selectedHistoryElectionId));
+  }, [historySelectionStorageKey, selectedHistoryElectionId]);
+
+  useEffect(() => {
+    if (activeTab !== 'live-ledger') return;
+    fetchLatestLiveLedger();
+    const timer = setInterval(() => {
+      fetchLatestLiveLedger();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [activeTab, fetchLatestLiveLedger]);
 
   useEffect(() => {
     if (!election || timeRemaining <= 0) return;
@@ -538,7 +683,7 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
     ? `${lastVerificationResult.vote_hash.slice(0, 18)}...${lastVerificationResult.vote_hash.slice(-10)}`
     : null;
 
-  if (voted) {
+  if (voted && activeTab === 'portal') {
     return (
       <div className="space-y-6 max-w-3xl mx-auto">
         <div className="bg-white dark:bg-[#121214] p-12 rounded-xl shadow-md text-center border border-emerald-200 dark:border-emerald-500/20">
@@ -992,6 +1137,8 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
         )}
       </div>
 
+      {activeTab === 'portal' && (
+      <>
       {/* Election / Voting Section */}
       {!election ? (
         <div className="bg-white dark:bg-[#121214] p-10 rounded-xl shadow-md text-center border border-amber-200 dark:border-amber-500/20">
@@ -1181,6 +1328,224 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
                 <li>- The election ends in <strong>{formatTimeRemaining(timeRemaining)}</strong>.</li>
               </ul>
             </div>
+          </div>
+        </div>
+      )}
+      </>
+      )}
+
+      {activeTab === 'history' && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          <div className="xl:col-span-4 bg-white dark:bg-[#121214] rounded-xl shadow-md border border-zinc-200 dark:border-white/10 overflow-hidden">
+            <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/60 dark:bg-transparent">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 flex items-center justify-center">
+                  <History className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Election History</h3>
+                  <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">{student.branch} Section {student.section}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4">
+              {historyLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <RefreshCw className="w-5 h-5 animate-spin text-zinc-400" />
+                </div>
+              ) : historyElections.length === 0 ? (
+                <div className="text-center py-12 text-zinc-500 dark:text-zinc-400">
+                  <CalendarDays className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p className="font-semibold">No past elections found yet.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {historyElections.map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => setSelectedHistoryElectionId(item.id)}
+                      className={`w-full text-left rounded-xl border p-4 transition-all ${
+                        selectedHistoryElectionId === item.id
+                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-500/10 dark:border-blue-400'
+                          : 'border-zinc-200 dark:border-white/10 hover:border-blue-300 dark:hover:border-blue-500/40'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-bold text-zinc-900 dark:text-white">
+                          {item.branch} - Section {item.section}
+                        </p>
+                        <span className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-widest ${
+                          item.status === 'active'
+                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+                            : 'bg-zinc-100 text-zinc-700 dark:bg-white/10 dark:text-zinc-300'
+                        }`}>
+                          {item.status}
+                        </span>
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">Ended {formatDateTime(item.end_time)}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="xl:col-span-8 bg-white dark:bg-[#121214] rounded-xl shadow-md border border-zinc-200 dark:border-white/10 overflow-hidden">
+            <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/60 dark:bg-transparent">
+              <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Result Snapshot</h3>
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Review the vote split for your class elections.</p>
+            </div>
+
+            <div className="p-6">
+              {historyResultsLoading ? (
+                <div className="flex items-center justify-center py-24">
+                  <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+                </div>
+              ) : !historyResults ? (
+                <div className="text-center py-24 text-zinc-500 dark:text-zinc-400">
+                  <History className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p className="font-semibold">Select an election to view its result.</p>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50 dark:bg-white/5 p-4">
+                      <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Election</p>
+                      <p className="text-sm font-bold text-zinc-900 dark:text-white mt-2">
+                        {historyResults.election.branch} - Section {historyResults.election.section}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50 dark:bg-white/5 p-4">
+                      <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Total Votes</p>
+                      <p className="text-2xl font-black text-zinc-900 dark:text-white mt-2">{historyResults.election.total_votes}</p>
+                    </div>
+                    <div className="rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50 dark:bg-white/5 p-4">
+                      <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Leading Candidate</p>
+                      <p className="text-sm font-bold text-zinc-900 dark:text-white mt-2">
+                        {historyResults.results[0]?.name || 'No candidates'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/10">
+                    <table className="w-full text-left whitespace-nowrap">
+                      <thead className="bg-zinc-50/90 dark:bg-white/[0.02] text-xs uppercase tracking-widest text-zinc-500 dark:text-zinc-400 font-extrabold border-b border-zinc-200 dark:border-white/10">
+                        <tr>
+                          <th className="px-4 py-3">Candidate</th>
+                          <th className="px-4 py-3">USN</th>
+                          <th className="px-4 py-3">Votes</th>
+                          <th className="px-4 py-3">Share</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-200/60 dark:divide-white/5">
+                        {historyResults.results.map((candidateResult) => (
+                          <tr key={candidateResult.candidate_id} className="hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors">
+                            <td className="px-4 py-3 text-sm font-bold text-zinc-900 dark:text-white">{candidateResult.name}</td>
+                            <td className="px-4 py-3 text-xs font-mono text-zinc-500 dark:text-zinc-400">{candidateResult.usn}</td>
+                            <td className="px-4 py-3 text-sm font-bold text-zinc-700 dark:text-zinc-300">{candidateResult.votes}</td>
+                            <td className="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">{candidateResult.percentage}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'live-ledger' && (
+        <div className="bg-white dark:bg-[#121214] rounded-xl shadow-md border border-zinc-200 dark:border-white/10 overflow-hidden">
+          <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/60 dark:bg-transparent">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 flex items-center justify-center">
+                  <BookOpen className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Live Vote Ledger</h3>
+                  <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Visible to everyone while an election is active.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => fetchLatestLiveLedger()}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-100 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/20 text-sm font-semibold"
+              >
+                <RefreshCw className={`w-4 h-4 ${ledgerLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          <div className="p-6">
+            {ledgerLoading ? (
+              <div className="flex items-center justify-center py-24">
+                <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+              </div>
+            ) : !liveLedgerData ? (
+              <div className="text-center py-24 text-zinc-500 dark:text-zinc-400">
+                <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                <p className="font-semibold">No live election right now.</p>
+                <p className="text-sm mt-2">This tab will show anonymous vote activity as soon as an election goes live.</p>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                <div className="rounded-xl border border-blue-200 dark:border-blue-500/20 bg-blue-50 dark:bg-blue-500/5 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] font-black uppercase tracking-widest text-blue-700 dark:text-blue-300">Current Election</p>
+                      <p className="text-lg font-bold text-zinc-900 dark:text-white mt-2">
+                        {liveLedgerData.election.branch} - Section {liveLedgerData.election.section}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <span className="px-3 py-1 rounded-md bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 text-xs font-black uppercase tracking-widest">
+                        {liveLedgerData.total_votes} Votes
+                      </span>
+                      <span className="px-3 py-1 rounded-md bg-zinc-100 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 text-xs font-black uppercase tracking-widest">
+                        {liveLedgerData.timezone}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/10">
+                  <table className="w-full text-left whitespace-nowrap">
+                    <thead className="bg-zinc-50/90 dark:bg-white/[0.02] text-xs uppercase tracking-widest text-zinc-500 dark:text-zinc-400 font-extrabold border-b border-zinc-200 dark:border-white/10">
+                      <tr>
+                        <th className="px-4 py-3">#</th>
+                        <th className="px-4 py-3">Timestamp</th>
+                        <th className="px-4 py-3">Type</th>
+                        <th className="px-4 py-3">Candidate</th>
+                        <th className="px-4 py-3">Hash</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-200/60 dark:divide-white/5">
+                      {liveLedgerData.ledger.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-16 text-center text-zinc-500 dark:text-zinc-400">
+                            Votes will appear here once ballots are cast.
+                          </td>
+                        </tr>
+                      ) : (
+                        liveLedgerData.ledger.map((vote) => (
+                          <tr key={vote.vote_index} className="hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors">
+                            <td className="px-4 py-3 text-xs font-bold text-zinc-500 dark:text-zinc-400">#{vote.chain_position}</td>
+                            <td className="px-4 py-3 text-xs font-mono text-zinc-700 dark:text-zinc-300">{vote.timestamp_ist}</td>
+                            <td className="px-4 py-3 text-xs font-bold text-zinc-700 dark:text-zinc-300">{vote.is_nota ? 'NOTA' : 'Regular'}</td>
+                            <td className="px-4 py-3 text-sm font-semibold text-zinc-900 dark:text-white">{vote.candidate_name || (vote.is_nota ? 'None of the Above' : 'N/A')}</td>
+                            <td className="px-4 py-3 text-xs font-mono text-zinc-500 dark:text-zinc-400">{vote.vote_hash.slice(0, 12)}...{vote.vote_hash.slice(-8)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
