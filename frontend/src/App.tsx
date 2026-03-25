@@ -5,7 +5,7 @@ import Admin from './components/Admin';
 import Login from './components/Login';
 import StudentProfile from './components/StudentProfile';
 import { ThemeProvider, useTheme } from './components/ThemeProvider';
-import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, DoorOpen, Users, CalendarDays, Shield as ShieldIcon, GraduationCap, BookOpen, FileClock } from 'lucide-react';
 import Tooltip from './components/Tooltip';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -71,12 +71,19 @@ const ThemeToggle = () => {
   );
 };
 
-const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false }: { userType: 'student' | 'admin' | null, onLogout?: () => void, onClick?: () => void, collapsed?: boolean }) => {
+const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false, onNavigateToTab }: { userType: 'student' | 'admin' | null, onLogout?: () => void, onClick?: () => void, collapsed?: boolean, onNavigateToTab?: (tab: string) => void }) => {
   const linkClass = (active: boolean) => `group flex items-center gap-3 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
     active
       ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
-      : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white'
+      : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white'
   } ${collapsed ? 'lg:justify-center lg:px-3' : ''}`;
+
+  const handleAdminNav = (tab: string) => {
+    if (onNavigateToTab) {
+      onNavigateToTab(tab);
+      onClick?.();
+    }
+  };
 
   return (
     <nav className="space-y-2 mt-6 px-4">
@@ -87,7 +94,39 @@ const NavigationLinks = ({ userType, onLogout, onClick, collapsed = false }: { u
           <span className={collapsed ? 'lg:hidden' : ''}>Voter Portal</span>
         </button>
       )}
-      {userType === 'admin' && (
+      {userType === 'admin' && onNavigateToTab && (
+        <>
+          <button onClick={() => handleAdminNav('global')} className={linkClass(false)}>
+            <DoorOpen className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Registration</span>
+          </button>
+          <button onClick={() => handleAdminNav('all-candidates')} className={linkClass(false)}>
+            <Users className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>All Candidates</span>
+          </button>
+          <button onClick={() => handleAdminNav('election')} className={linkClass(false)}>
+            <CalendarDays className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Elections</span>
+          </button>
+          <button onClick={() => handleAdminNav('candidates')} className={linkClass(false)}>
+            <ShieldIcon className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Approvals</span>
+          </button>
+          <button onClick={() => handleAdminNav('students')} className={linkClass(false)}>
+            <GraduationCap className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Students</span>
+          </button>
+          <button onClick={() => handleAdminNav('live-ledger')} className={linkClass(false)}>
+            <BookOpen className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Live Ledger</span>
+          </button>
+          <button onClick={() => handleAdminNav('audit-log')} className={linkClass(false)}>
+            <FileClock className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Audit Log</span>
+          </button>
+        </>
+      )}
+      {userType === 'admin' && !onNavigateToTab && (
         <button onClick={onClick} className={linkClass(true)}>
           <LayoutGrid className="w-4 h-4 text-blue-600" />
           <span className={collapsed ? 'lg:hidden' : ''}>Admin Panel</span>

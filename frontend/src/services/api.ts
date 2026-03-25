@@ -97,6 +97,55 @@ export interface VoteReceiptVerificationResponse {
   summary?: VoteReceiptVerificationSummary;
 }
 
+export interface LedgerVote {
+  vote_index: number;
+  vote_hash: string;
+  previous_hash: string;
+  timestamp_ist: string;
+  timestamp_utc: string;
+  is_nota: boolean;
+  candidate_name?: string | null;
+  chain_position: number;
+}
+
+export interface LiveLedgerResponse {
+  election: {
+    id: number;
+    branch: string;
+    section: string;
+    is_active: boolean;
+    start_time: string;
+    end_time: string;
+  };
+  merkle_root: string | null;
+  total_votes: number;
+  total_receipts: number;
+  ledger: LedgerVote[];
+  transparency_note: string;
+  timezone: string;
+}
+
+export interface AuditLogEntry {
+  id: number;
+  timestamp_ist: string;
+  timestamp_utc: string;
+  action: string;
+  entity_type: string;
+  entity_id: number | null;
+  user_email: string | null;
+  old_values: Record<string, any> | null;
+  new_values: Record<string, any> | null;
+  ip_address: string | null;
+  user_agent: string | null;
+}
+
+export interface AuditLogsResponse {
+  audit_logs: AuditLogEntry[];
+  total_count: number;
+  limit: number;
+  timezone: string;
+}
+
 export const electionsAPI = {
   getActiveElection: async (branch: string, section: string): Promise<{ election: Election | null; candidates: Candidate[] }> => {
     const response = await api.get('/elections/active', {
@@ -291,6 +340,21 @@ export const adminAPI = {
 
   resetAllData: async () => {
     const response = await api.post('/admin/system/reset-all');
+    return response.data;
+  },
+
+  // Live Ledger & Transparency
+  getLiveLedger: async (election_id: number): Promise<LiveLedgerResponse> => {
+    const response = await api.get(`/admin/live-ledger/${election_id}`);
+    return response.data;
+  },
+
+  // Audit Logs
+  getAuditLogs: async (limit: number = 100, entity_type?: string, action?: string): Promise<AuditLogsResponse> => {
+    const params: Record<string, string | number> = { limit };
+    if (entity_type) params.entity_type = entity_type;
+    if (action) params.action = action;
+    const response = await api.get('/admin/audit-logs', { params });
     return response.data;
   },
 

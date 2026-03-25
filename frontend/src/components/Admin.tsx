@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { adminAPI } from '../services/api';
+import { adminAPI, electionsAPI } from '../services/api';
 import {
   Plus,
   Users,
@@ -23,7 +23,12 @@ import {
   KeyRound,
   LogOut,
   PieChart,
-  SquareStop
+  SquareStop,
+  BookOpen,
+  FileClock,
+  Vote,
+  Link2,
+  ThumbsDown
 } from 'lucide-react';
 import ChangePasswordModal from './ChangePasswordModal';
 import ElectionAnalytics from './ElectionAnalytics';
@@ -108,6 +113,44 @@ interface SectionGroup {
   approved_count: number;
   pending_count: number;
   candidates: SectionCandidate[];
+}
+
+interface LedgerVote {
+  vote_index: number;
+  vote_hash: string;
+  previous_hash: string;
+  timestamp_ist: string;
+  is_nota: boolean;
+  candidate_name?: string | null;
+  chain_position: number;
+}
+
+interface LiveLedgerData {
+  election: {
+    id: number;
+    branch: string;
+    section: string;
+    is_active: boolean;
+    start_time: string;
+    end_time: string;
+  };
+  merkle_root: string | null;
+  total_votes: number;
+  total_receipts: number;
+  ledger: LedgerVote[];
+  transparency_note: string;
+  timezone: string;
+}
+
+interface AuditLogEntry {
+  id: number;
+  timestamp_ist: string;
+  action: string;
+  entity_type: string;
+  entity_id: number | null;
+  user_email: string | null;
+  old_values: Record<string, any> | null;
+  new_values: Record<string, any> | null;
 }
 
 type SelectOption = string | { value: string; label: string };
@@ -209,7 +252,7 @@ const Admin: React.FC = () => {
   const [durationPreset, setDurationPreset] = useState('60');
   const [electionDuration, setElectionDuration] = useState(15);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'global' | 'election' | 'candidates' | 'students' | 'all-candidates'>('global');
+  const [activeTab, setActiveTab] = useState<'global' | 'election' | 'candidates' | 'students' | 'all-candidates' | 'live-ledger' | 'audit-log'>('global');
   const [elections, setElections] = useState<Election[]>([]);
   const [pendingCandidates, setPendingCandidates] = useState<Candidate[]>([]);
   const [windowCandidates, setWindowCandidates] = useState<Candidate[]>([]);
@@ -245,6 +288,11 @@ const Admin: React.FC = () => {
   const [rejectCandidateId, setRejectCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [submittingReject, setSubmittingReject] = useState(false);
+  const [liveLedgerData, setLiveLedgerData] = useState<LiveLedgerData | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [selectedElectionForLedger, setSelectedElectionForLedger] = useState<number | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [auditLogsLoading, setAuditLogsLoading] = useState(false);
   const STUDENTS_PER_PAGE = 25;
 
   const fetchElections = useCallback(async () => {
@@ -262,6 +310,32 @@ const Admin: React.FC = () => {
       setPendingCandidates(data.candidates || []);
     } catch (err) {
       console.error('Failed to fetch pending candidates', err);
+    }
+  }, []);
+
+  const fetchLiveLedger = useCallback(async (election_id: number) => {
+    setLedgerLoading(true);
+    try {
+      const data = await electionsAPI.getLiveLedger(election_id);
+      setLiveLedgerData(data);
+    } catch (err) {
+      console.error('Failed to fetch live ledger', err);
+      setLiveLedgerData(null);
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, []);
+
+  const fetchAuditLogs = useCallback(async () => {
+    setAuditLogsLoading(true);
+    try {
+      const data = await adminAPI.getAuditLogs(200);
+      setAuditLogs(data.audit_logs || []);
+    } catch (err) {
+      console.error('Failed to fetch audit logs', err);
+      setAuditLogs([]);
+    } finally {
+      setAuditLogsLoading(false);
     }
   }, []);
 
@@ -401,7 +475,18 @@ const Admin: React.FC = () => {
     if (activeTab === 'students') {
       fetchStudents();
     }
-  }, [activeTab, fetchGlobalRegistrationStatus, fetchSectionOverrides, fetchSectionWiseCandidates, fetchStudents]);
+    if (activeTab === 'live-ledger') {
+      // Load most recent active election for ledger
+      const activeElection = elections.find(e => e.status === 'active');
+      if (activeElection) {
+        setSelectedElectionForLedger(activeElection.id);
+        fetchLiveLedger(activeElection.id);
+      }
+    }
+    if (activeTab === 'audit-log') {
+      fetchAuditLogs();
+    }
+  }, [activeTab, fetchGlobalRegistrationStatus, fetchSectionOverrides, fetchSectionWiseCandidates, fetchStudents, elections, fetchLiveLedger, fetchAuditLogs]);
 
   // Polling fallback when WebSocket is unavailable
   useEffect(() => {
@@ -845,61 +930,85 @@ const Admin: React.FC = () => {
       {/* Header Section */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
         <div>
-          <h1 className="text-3xl font-extrabold text-zinc-900 dark:text-white tracking-tight leading-tight">Admin Panel</h1>
-          <p className="text-base font-medium text-zinc-500 dark:text-zinc-400 mt-2">Manage elections, registrations, and candidate approvals.</p>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-900 dark:text-white tracking-tight leading-tight">Admin Panel</h1>
+          <p className="text-sm sm:text-base font-medium text-zinc-500 dark:text-zinc-400 mt-2">Manage elections, registrations, and candidate approvals.</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
           <div className="flex items-center bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none p-1.5 backdrop-blur-xl">
-            <div className="px-4 py-1.5 flex items-center gap-2.5 text-[13px] font-bold text-zinc-700 dark:text-zinc-200 border-r border-zinc-200 dark:border-white/10">
-              <Activity className="w-4 h-4 text-blue-500" /> {elections.length} Active
+            <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 text-[11px] sm:text-[13px] font-bold text-zinc-700 dark:text-zinc-200 border-r border-zinc-200 dark:border-white/10">
+              <Activity className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-500" /> {elections.length} Active
             </div>
-            <div className="px-4 py-1.5 flex items-center gap-2.5 text-[13px] font-bold text-zinc-700 dark:text-zinc-200">
-              <Users className="w-4 h-4 text-amber-500" /> {pendingCandidates.length} Pending
+            <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 text-[11px] sm:text-[13px] font-bold text-zinc-700 dark:text-zinc-200">
+              <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-500" /> {pendingCandidates.length} Pending
             </div>
           </div>
           <Tooltip content="Refresh Data">
             <button
               onClick={() => { fetchElections(); fetchGlobalRegistrationStatus(); fetchSectionOverrides(); }}
-              className="p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-zinc-50 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="p-2 sm:p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-zinc-50 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <RefreshCw className="w-5 h-5" />
+              <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
           </Tooltip>
           <Tooltip content="Change Password">
             <button
               onClick={() => setShowChangePassword(true)}
-              className="p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="p-2 sm:p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <KeyRound className="w-5 h-5" />
+              <KeyRound className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
           </Tooltip>
           <Tooltip content="Reset All Data (Testing Only)">
             <button
               onClick={handleSystemReset}
               disabled={resetting}
-              className="p-3 bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg shadow-red-500/20 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+              className="p-2 sm:p-3 bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg shadow-red-500/20 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
             >
-              {resetting ? <RefreshCw className="w-5 h-5 animate-spin" /> : <XCircle className="w-5 h-5" />}
+              {resetting ? <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <XCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
             </button>
           </Tooltip>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex space-x-2 border-b border-zinc-200 dark:border-white/10 overflow-x-auto custom-scrollbar pb-px">
+      {/* Mobile Tab Selector */}
+      <div className="lg:hidden mt-4">
+        <div className="relative">
+          <select
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value as any)}
+            className="w-full appearance-none bg-white dark:bg-[#121214] border border-zinc-300 dark:border-white/10 text-zinc-900 dark:text-zinc-100 text-[15px] font-semibold rounded-xl px-4 py-3 pr-10 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 dark:focus:ring-blue-500/40 transition-all cursor-pointer hover:border-zinc-400 dark:hover:border-white/20"
+          >
+            <option value="global">Candidate Registration</option>
+            <option value="all-candidates">All Candidates</option>
+            <option value="election">Voting Instances</option>
+            <option value="candidates">Approvals</option>
+            <option value="students">Students Directory</option>
+            <option value="live-ledger">Live Ledger</option>
+            <option value="audit-log">Audit Log</option>
+          </select>
+          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-zinc-500 dark:text-zinc-400">
+            <ChevronDown className="h-5 w-5" />
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs - Hidden on mobile, shown on lg screens */}
+      <div className="hidden lg:flex space-x-2 border-b border-zinc-200 dark:border-white/10 overflow-x-auto custom-scrollbar pb-px">
         {[
           { id: 'global', label: 'Candidate Registration', icon: DoorOpen },
           { id: 'all-candidates', label: 'All Candidates', icon: Users },
           { id: 'election', label: 'Voting Instances', icon: CalendarDays },
           { id: 'candidates', label: 'Approvals', icon: ShieldCheck, badge: pendingCandidates.length },
-          { id: 'students', label: 'Students Directory', icon: GraduationCap }
+          { id: 'students', label: 'Students Directory', icon: GraduationCap },
+          { id: 'live-ledger', label: 'Live Ledger', icon: BookOpen },
+          { id: 'audit-log', label: 'Audit Log', icon: FileClock }
         ].map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id as any)}
             className={`flex items-center gap-2.5 px-5 py-3.5 text-[15px] font-bold border-b-2 transition-all duration-300 whitespace-nowrap ${
-              activeTab === tab.id 
-                ? 'border-blue-600 text-blue-600 dark:border-blue-500 dark:text-blue-400' 
+              activeTab === tab.id
+                ? 'border-blue-600 text-blue-600 dark:border-blue-500 dark:text-blue-400'
                 : 'border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:border-zinc-300 dark:hover:border-white/30'
             }`}
           >
@@ -1680,6 +1789,276 @@ const Admin: React.FC = () => {
               </>
               );
             })()}
+
+            {/* Live Ledger Tab */}
+            {activeTab === 'live-ledger' && (
+              <>
+                <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/50 dark:bg-transparent">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 flex items-center justify-center">
+                        <BookOpen className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Live Vote Ledger</h3>
+                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Real-time transparent vote tracking with cryptographic verification.</p>
+                      </div>
+                    </div>
+                    {liveLedgerData && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-black uppercase tracking-widest bg-blue-100 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 px-3 py-1 rounded-md">
+                          {liveLedgerData.total_votes} Votes
+                        </span>
+                        <span className="text-xs font-black uppercase tracking-widest bg-emerald-100 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 px-3 py-1 rounded-md">
+                          {liveLedgerData.timezone}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-6">
+                  {ledgerLoading ? (
+                    <div className="flex items-center justify-center py-32">
+                      <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+                    </div>
+                  ) : !liveLedgerData ? (
+                    <div className="text-center py-32">
+                      <div className="inline-flex flex-col items-center text-zinc-400 dark:text-zinc-600">
+                        <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center mb-4">
+                          <BookOpen className="w-8 h-8 opacity-50" />
+                        </div>
+                        <p className="text-base font-bold text-zinc-500 dark:text-zinc-400">No active election</p>
+                        <p className="text-sm font-medium text-zinc-400 dark:text-zinc-500 mt-1">Live ledger will appear when an election is active</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Election Info Card */}
+                      <div className="bg-blue-50 dark:bg-blue-500/5 border border-blue-200 dark:border-blue-500/20 rounded-xl p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase tracking-widest mb-1">Election</p>
+                            <p className="text-lg font-bold text-zinc-900 dark:text-white">
+                              {liveLedgerData.election.branch} - Section {liveLedgerData.election.section}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-3">
+                            <div>
+                              <p className="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase tracking-widest mb-1">Status</p>
+                              <span className={`inline-flex items-center px-3 py-1 rounded-md text-xs font-black uppercase tracking-wider ${
+                                liveLedgerData.election.is_active
+                                  ? 'bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400'
+                                  : 'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400'
+                              }`}>
+                                {liveLedgerData.election.is_active ? 'Active' : 'Ended'}
+                              </span>
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase tracking-widest mb-1">Merkle Root</p>
+                              <p className="text-xs font-mono text-zinc-700 dark:text-zinc-300 max-w-[200px] truncate" title={liveLedgerData.merkle_root || 'N/A'}>
+                                {liveLedgerData.merkle_root ? `${liveLedgerData.merkle_root.slice(0, 12)}...${liveLedgerData.merkle_root.slice(-8)}` : 'N/A'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Vote Ledger Table */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left whitespace-nowrap">
+                          <thead className="bg-zinc-50/80 dark:bg-white/[0.02] text-xs uppercase tracking-widest text-zinc-500 dark:text-zinc-400 font-extrabold border-b border-zinc-200 dark:border-white/10">
+                            <tr>
+                              <th className="px-4 py-3">#</th>
+                              <th className="px-4 py-3">Timestamp (IST)</th>
+                              <th className="px-4 py-3">Vote Type</th>
+                              <th className="px-4 py-3">Candidate</th>
+                              <th className="px-4 py-3">Vote Hash</th>
+                              <th className="px-4 py-3">Chain Link</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-200/60 dark:divide-white/5 text-zinc-700 dark:text-zinc-300">
+                            {liveLedgerData.ledger.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} className="px-4 py-32 text-center">
+                                  <div className="inline-flex flex-col items-center text-zinc-400 dark:text-zinc-600">
+                                    <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center mb-4">
+                                      <BookOpen className="w-8 h-8 opacity-50" />
+                                    </div>
+                                    <p className="text-base font-bold text-zinc-500 dark:text-zinc-400">No votes yet</p>
+                                    <p className="text-sm font-medium text-zinc-400 dark:text-zinc-500 mt-1">Votes will appear here in real-time</p>
+                                  </div>
+                                </td>
+                              </tr>
+                            ) : (
+                              liveLedgerData.ledger.map((vote) => (
+                                <tr key={vote.vote_index} className="hover:bg-zinc-50/90 dark:hover:bg-white/[0.02] transition-colors duration-200">
+                                  <td className="px-4 py-3 text-xs font-bold text-zinc-500 dark:text-zinc-400">#{vote.chain_position}</td>
+                                  <td className="px-4 py-3 text-xs font-mono text-zinc-700 dark:text-zinc-300">{vote.timestamp_ist}</td>
+                                  <td className="px-4 py-3">
+                                    {vote.is_nota ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+                                        <ThumbsDown className="w-3 h-3" /> NOTA
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400">
+                                        <CheckCircle2 className="w-3 h-3" /> Regular
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm font-bold text-zinc-900 dark:text-white">
+                                    {vote.candidate_name || (vote.is_nota ? 'None of the Above' : 'N/A')}
+                                  </td>
+                                  <td className="px-4 py-3 text-xs font-mono text-zinc-600 dark:text-zinc-400 max-w-[150px] truncate" title={vote.vote_hash}>
+                                    {vote.vote_hash.slice(0, 12)}...{vote.vote_hash.slice(-8)}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex items-center gap-1">
+                                      <Link2 className="w-3 h-3 text-zinc-400" />
+                                      <span className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
+                                        {vote.previous_hash ? 'Linked' : 'Genesis'}
+                                      </span>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Transparency Note */}
+                      <div className="bg-emerald-50 dark:bg-emerald-500/5 border border-emerald-200 dark:border-emerald-500/20 rounded-xl p-4">
+                        <div className="flex items-start gap-3">
+                          <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-sm font-bold text-emerald-900 dark:text-emerald-300 mb-1">Transparency Guarantee</p>
+                            <p className="text-xs text-emerald-700 dark:text-emerald-400/80 leading-relaxed">
+                              {liveLedgerData.transparency_note}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Audit Log Tab */}
+            {activeTab === 'audit-log' && (
+              <>
+                <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/50 dark:bg-transparent">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 flex items-center justify-center">
+                        <FileClock className="w-5 h-5 text-violet-600 dark:text-violet-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">Audit Trail</h3>
+                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Complete event history for transparency and accountability.</p>
+                      </div>
+                    </div>
+                    {auditLogs.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-black uppercase tracking-widest bg-violet-100 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400 px-3 py-1 rounded-md">
+                          {auditLogs.length} Events
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-6">
+                  {auditLogsLoading ? (
+                    <div className="flex items-center justify-center py-32">
+                      <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+                    </div>
+                  ) : auditLogs.length === 0 ? (
+                    <div className="text-center py-32">
+                      <div className="inline-flex flex-col items-center text-zinc-400 dark:text-zinc-600">
+                        <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center mb-4">
+                          <FileClock className="w-8 h-8 opacity-50" />
+                        </div>
+                        <p className="text-base font-bold text-zinc-500 dark:text-zinc-400">No audit logs found</p>
+                        <p className="text-sm font-medium text-zinc-400 dark:text-zinc-500 mt-1">System events will be recorded here</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {auditLogs.map((log) => (
+                        <div key={log.id} className="rounded-xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#09090B] p-4 hover:border-zinc-300 dark:hover:border-white/20 transition-all">
+                          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                            <div className="flex items-start gap-3">
+                              <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${
+                                log.action === 'VOTE' ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/20' :
+                                log.action === 'START' ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' :
+                                log.action === 'APPROVE' || log.action === 'CREATE' ? 'bg-violet-50 dark:bg-violet-500/10 border-violet-200 dark:border-violet-500/20' :
+                                log.action === 'REJECT' || log.action === 'DELETE' ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20' :
+                                'bg-zinc-50 dark:bg-white/5 border-zinc-200 dark:border-white/10'
+                              }`}>
+                                {log.action === 'VOTE' ? <Vote className="w-5 h-5 text-blue-600 dark:text-blue-400" /> :
+                                 log.action === 'START' ? <CalendarDays className="w-5 h-5 text-emerald-600 dark:text-emerald-400" /> :
+                                 log.action === 'APPROVE' ? <CheckCircle2 className="w-5 h-5 text-violet-600 dark:text-violet-400" /> :
+                                 log.action === 'REJECT' ? <XCircle className="w-5 h-5 text-red-600 dark:text-red-400" /> :
+                                 <Activity className="w-5 h-5 text-zinc-600 dark:text-zinc-400" />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${
+                                    log.action === 'VOTE' ? 'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400' :
+                                    log.action === 'START' ? 'bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400' :
+                                    log.action === 'APPROVE' || log.action === 'CREATE' ? 'bg-violet-100 dark:bg-violet-500/20 text-violet-700 dark:text-violet-400' :
+                                    log.action === 'REJECT' || log.action === 'DELETE' ? 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400' :
+                                    'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400'
+                                  }`}>
+                                    {log.action}
+                                  </span>
+                                  <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300">{log.entity_type}</span>
+                                  {log.entity_id && (
+                                    <span className="text-xs font-mono text-zinc-500 dark:text-zinc-400">#{log.entity_id}</span>
+                                  )}
+                                </div>
+                                <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                                  {log.user_email && (
+                                    <span className="font-medium">By: {log.user_email}</span>
+                                  )}
+                                </p>
+                                <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 mt-1">
+                                  {log.timestamp_ist}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Show old/new values if available */}
+                            {(log.old_values || log.new_values) && (
+                              <div className="lg:text-right">
+                                {log.new_values && (
+                                  <div className="text-xs">
+                                    <span className="text-zinc-500 dark:text-zinc-400">New: </span>
+                                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                                      {JSON.stringify(log.new_values).slice(0, 100)}{JSON.stringify(log.new_values).length > 100 ? '...' : ''}
+                                    </span>
+                                  </div>
+                                )}
+                                {log.old_values && (
+                                  <div className="text-xs mt-1">
+                                    <span className="text-zinc-500 dark:text-zinc-400">Old: </span>
+                                    <span className="font-mono text-red-600 dark:text-red-400">
+                                      {JSON.stringify(log.old_values).slice(0, 100)}{JSON.stringify(log.old_values).length > 100 ? '...' : ''}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
 
           </div>
         </div>

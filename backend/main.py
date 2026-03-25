@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Set, Callable, Awaitable
 from pydantic import BaseModel, Field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import models, database
 import logging
 from contextlib import asynccontextmanager
@@ -20,6 +20,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Indian Standard Time: UTC+5:30
+IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 # ============== WebSocket Connection Manager ==============
@@ -258,26 +261,61 @@ class VoteReceiptVerifyRequest(BaseModel):
 
 # ============== Helper Functions ==============
 
+def get_current_indian_time() -> datetime:
+    """Get current time in Indian Standard Time (IST = UTC+5:30)."""
+    return datetime.now(timezone(IST_OFFSET))
+
+
+def format_indian_time(dt: datetime) -> str:
+    """Format datetime to Indian Standard Time string."""
+    if dt.tzinfo is None:
+        # Assume UTC if no timezone info
+        dt = dt.replace(tzinfo=timezone.utc)
+    ist_time = dt.astimezone(timezone(IST_OFFSET))
+    return ist_time.strftime("%Y-%m-%d %H:%M:%S IST")
+
+
 def is_election_active(election: models.Election) -> bool:
     """Check if election is currently active."""
-    now = datetime.utcnow()
-    return election.is_active and election.start_time <= now <= election.end_time
+    now = get_current_indian_time()
+    # Convert election times to IST for comparison
+    election_start = election.start_time
+    election_end = election.end_time
+    # If election times are naive (no timezone), assume UTC and convert to IST
+    if election_start.tzinfo is None:
+        election_start = election_start.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    if election_end.tzinfo is None:
+        election_end = election_end.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    return election.is_active and election_start <= now <= election_end
 
 
 def is_candidature_window_open(window: models.CandidatureWindow) -> bool:
     """Check if candidature window is currently open."""
-    now = datetime.utcnow()
-    return window.is_open and window.start_time <= now <= window.end_time
+    now = get_current_indian_time()
+    start = window.start_time
+    end = window.end_time
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    return window.is_open and start <= now <= end
 
 
 def is_global_registration_active(db: Session) -> bool:
     """Check if global registration window is currently active."""
-    now = datetime.utcnow()
-    # Check the most recent global window
+    now = get_current_indian_time()
     global_window = db.query(models.GlobalRegistrationWindow).order_by(
         models.GlobalRegistrationWindow.created_at.desc()
     ).first()
-    return global_window and global_window.is_open and global_window.start_time <= now <= global_window.end_time
+    if not global_window:
+        return False
+    start = global_window.start_time
+    end = global_window.end_time
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+    return global_window.is_open and start <= now <= end
 
 
 def validate_password(password: str) -> tuple[bool, str]:
@@ -2405,22 +2443,22 @@ def get_public_vote_ledger(election_id: int, db: Session = Depends(database.get_
     Does NOT reveal voter identities, only vote hashes and timestamps.
     """
     import json as json_module
-    
+
     election = db.query(models.Election).filter(
         models.Election.id == election_id
     ).first()
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    
+
     votes = db.query(models.Vote).filter(
         models.Vote.election_id == election_id
     ).order_by(models.Vote.cast_at).all()
-    
+
     # Get Merkle tree
     merkle_tree = db.query(models.MerkleTree).filter(
         models.MerkleTree.election_id == election_id
     ).first()
-    
+
     # Anonymous vote data (no voter info)
     ledger = []
     for i, vote in enumerate(votes):
@@ -2428,23 +2466,136 @@ def get_public_vote_ledger(election_id: int, db: Session = Depends(database.get_
             "vote_index": i,
             "vote_hash": vote.vote_hash,
             "previous_hash": vote.previous_hash,
-            "timestamp": vote.cast_at.isoformat(),
+            "timestamp": format_indian_time(vote.cast_at),
+            "timestamp_utc": vote.cast_at.isoformat(),
             "is_nota": vote.candidate_id is None,
             "candidate_id": vote.candidate_id
         })
-    
+
     return {
         "election": {
             "id": election.id,
             "branch": election.branch,
             "section": election.section,
-            "start_time": election.start_time.isoformat(),
-            "end_time": election.end_time.isoformat()
+            "start_time": format_indian_time(election.start_time),
+            "end_time": format_indian_time(election.end_time)
         },
         "merkle_root": merkle_tree.root_hash if merkle_tree else None,
         "vote_count": len(votes),
         "ledger": ledger,
-        "verification_note": "This ledger contains anonymous vote data. Use it to independently verify election results."
+        "verification_note": "This ledger contains anonymous vote data. Use it to independently verify election results.",
+        "timezone": "Indian Standard Time (IST)"
+    }
+
+
+@app.get("/admin/live-ledger/{election_id}")
+def get_live_vote_ledger(election_id: int, db: Session = Depends(database.get_db)):
+    """
+    Live vote ledger for admin - real-time anonymous vote tracking.
+    Shows vote flow with timestamps in IST for transparency.
+    """
+    election = db.query(models.Election).filter(
+        models.Election.id == election_id
+    ).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+
+    votes = db.query(models.Vote).filter(
+        models.Vote.election_id == election_id
+    ).order_by(models.Vote.cast_at).all()
+
+    # Get Merkle tree
+    merkle_tree = db.query(models.MerkleTree).filter(
+        models.MerkleTree.election_id == election_id
+    ).first()
+
+    # Get vote receipt count
+    receipt_count = db.query(models.VoteReceipt).filter(
+        models.VoteReceipt.election_id == election_id
+    ).count()
+
+    # Anonymous vote data with detailed info
+    ledger = []
+    for i, vote in enumerate(votes):
+        candidate_name = None
+        if vote.candidate_id:
+            candidate = db.query(models.Candidate).filter(
+                models.Candidate.id == vote.candidate_id
+            ).first()
+            if candidate:
+                candidate_name = candidate.student.name
+
+        ledger.append({
+            "vote_index": i,
+            "vote_hash": vote.vote_hash,
+            "previous_hash": vote.previous_hash,
+            "timestamp_ist": format_indian_time(vote.cast_at),
+            "timestamp_utc": vote.cast_at.isoformat(),
+            "is_nota": vote.candidate_id is None,
+            "candidate_name": candidate_name if not vote.candidate_id is None else None,
+            "chain_position": i + 1
+        })
+
+    return {
+        "election": {
+            "id": election.id,
+            "branch": election.branch,
+            "section": election.section,
+            "is_active": election.is_active,
+            "start_time": format_indian_time(election.start_time),
+            "end_time": format_indian_time(election.end_time)
+        },
+        "merkle_root": merkle_tree.root_hash if merkle_tree else None,
+        "total_votes": len(votes),
+        "total_receipts": receipt_count,
+        "ledger": ledger,
+        "transparency_note": "This live ledger shows all votes in real-time while maintaining voter anonymity. Each vote is cryptographically chained to prevent tampering.",
+        "timezone": "Indian Standard Time (IST)"
+    }
+
+
+@app.get("/admin/audit-logs")
+def get_audit_logs(
+    limit: int = 100,
+    entity_type: Optional[str] = None,
+    action: Optional[str] = None,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Get audit logs for admin panel.
+    Shows all critical events in the system for transparency and accountability.
+    """
+    query = db.query(models.AuditLog).order_by(
+        models.AuditLog.timestamp.desc()
+    )
+
+    if entity_type:
+        query = query.filter(models.AuditLog.entity_type == entity_type)
+    
+    if action:
+        query = query.filter(models.AuditLog.action == action)
+
+    audit_logs = query.limit(limit).all()
+
+    return {
+        "audit_logs": [
+            {
+                "id": log.id,
+                "timestamp_ist": format_indian_time(log.timestamp),
+                "timestamp_utc": log.timestamp.isoformat(),
+                "action": log.action,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "user_email": log.user_email,
+                "old_values": json.loads(log.old_values) if log.old_values else None,
+                "new_values": json.loads(log.new_values) if log.new_values else None,
+                "ip_address": log.ip_address,
+                "user_agent": log.user_agent
+            } for log in audit_logs
+        ],
+        "total_count": len(audit_logs),
+        "limit": limit,
+        "timezone": "Indian Standard Time (IST)"
     }
 
 
