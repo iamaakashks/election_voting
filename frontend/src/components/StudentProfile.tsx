@@ -61,11 +61,29 @@ const getApiErrorMessage = (error: unknown, fallback: string): string => {
       if (maybeError.message.includes('Network Error')) {
         return 'Unable to connect to the server. Please check your connection and try again.';
       }
+      if (maybeError.message.toLowerCase().includes('timeout')) {
+        return 'The server took too long to respond. Please try again.';
+      }
       return normalize(maybeError.message);
     }
   }
   if (error instanceof Error && error.message) return normalize(error.message);
   return fallback;
+};
+
+const normalizeApiTimestamp = (value: string): string =>
+  /([zZ]|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+
+const isTransportError = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null) return false;
+  const maybeError = error as { response?: unknown; code?: unknown; message?: unknown };
+  if (maybeError.response) return false;
+  if (maybeError.code === 'ECONNABORTED') return true;
+  if (typeof maybeError.message === 'string') {
+    const msg = maybeError.message.toLowerCase();
+    return msg.includes('network error') || msg.includes('timeout');
+  }
+  return false;
 };
 
 const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) => {
@@ -109,9 +127,18 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
   const latestReceiptStorageKey = `vote_receipt_${student.usn}_latest`;
 
   const formatDateTime = (isoDate: string) => {
-    const date = new Date(isoDate);
+    const date = new Date(normalizeApiTimestamp(isoDate));
     if (Number.isNaN(date.getTime())) return isoDate;
-    return date.toLocaleString();
+    return new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    }).format(date);
   };
 
   const loadStoredReceiptCode = useCallback((electionId?: number | null): string => {
@@ -389,6 +416,27 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout }) =>
       setShowRegisterForm(false);
       setManifesto('');
     } catch (err: unknown) {
+      if (isTransportError(err)) {
+        try {
+          const latestStatus = await candidateAPI.getStatus(student.usn);
+          setCandidateRegistrationStatus(latestStatus);
+          if (latestStatus.is_registered) {
+            setShowRegisterForm(false);
+            setManifesto('');
+            setShowAlert({
+              type: latestStatus.status === 'rejected' ? 'warning' : 'success',
+              title: latestStatus.status === 'rejected' ? 'Registration Already Reviewed' : 'Registration Successful',
+              message:
+                latestStatus.status === 'rejected'
+                  ? latestStatus.message
+                  : 'Your candidacy has been submitted.\n\nThe action completed, but the server response was delayed.'
+            });
+            return;
+          }
+        } catch {
+          // Fall through to regular error handling.
+        }
+      }
       setShowAlert({
         type: 'error',
         title: 'Registration Failed',

@@ -148,6 +148,60 @@ const InputNumber = ({ label, value, onChange, min, helpText }: { label: string,
   </div>
 );
 
+const normalizeApiTimestamp = (value: string): string =>
+  /([zZ]|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+
+const formatIndianDateTime = (isoDate: string): string => {
+  const date = new Date(normalizeApiTimestamp(isoDate));
+  if (Number.isNaN(date.getTime())) return isoDate;
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(date);
+};
+
+const getApiErrorMessage = (error: unknown, fallback: string): string => {
+  if (typeof error === 'object' && error !== null) {
+    const maybeError = error as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+      code?: unknown;
+    };
+    if (typeof maybeError.response?.data?.detail === 'string' && maybeError.response.data.detail.trim()) {
+      return maybeError.response.data.detail.trim();
+    }
+    if (typeof maybeError.message === 'string' && maybeError.message.trim()) {
+      if (maybeError.message.includes('Network Error')) {
+        return 'Unable to connect to the server. Please check your connection and try again.';
+      }
+      if (maybeError.code === 'ECONNABORTED' || maybeError.message.toLowerCase().includes('timeout')) {
+        return 'The server took too long to respond. Please try again.';
+      }
+      return maybeError.message.trim();
+    }
+  }
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  return fallback;
+};
+
+const isTransportError = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null) return false;
+  const maybeError = error as { response?: unknown; code?: unknown; message?: unknown };
+  if (maybeError.response) return false;
+  if (maybeError.code === 'ECONNABORTED') return true;
+  if (typeof maybeError.message === 'string') {
+    const msg = maybeError.message.toLowerCase();
+    return msg.includes('network error') || msg.includes('timeout');
+  }
+  return false;
+};
+
 const Admin: React.FC = () => {
   const [branch, setBranch] = useState('CSE');
   const [section, setSection] = useState('A');
@@ -252,6 +306,17 @@ const Admin: React.FC = () => {
       setCandidatesLoading(false);
     }
   }, [candidateFilterBranch]);
+
+  const verifyCandidateApproved = useCallback(async (candidateId: number): Promise<boolean> => {
+    try {
+      const data = await adminAPI.getSectionWiseCandidates();
+      const allCandidates = (data.sections || []).flatMap((sectionGroup: SectionGroup) => sectionGroup.candidates || []);
+      const candidate = allCandidates.find((c: SectionCandidate) => c.id === candidateId);
+      return Boolean(candidate?.approved);
+    } catch {
+      return false;
+    }
+  }, []);
 
   // WebSocket for real-time admin updates
   const handleAdminWebSocketMessage = useCallback((message: WebSocketMessage) => {
@@ -399,7 +464,31 @@ const Admin: React.FC = () => {
       });
       fetchElections();
     } catch (err: any) {
-      const errorMsg = err.response?.data?.detail || 'Failed to start election';
+      const errorMsg = getApiErrorMessage(err, 'Failed to start election');
+
+      if (isTransportError(err)) {
+        try {
+          const latest = await adminAPI.listElections();
+          const hasActiveNow = (latest.elections || []).some(
+            (election: Election) =>
+              election.branch === branch &&
+              election.section === section &&
+              election.status === 'active'
+          );
+
+          if (hasActiveNow) {
+            setShowAlert({
+              type: 'success',
+              title: 'Election Started',
+              message: `Election for ${branch}-Sec ${section} has started.\n\nThe action completed, but the server response was delayed.`,
+            });
+            fetchElections();
+            return;
+          }
+        } catch {
+          // Fall back to regular error handling below.
+        }
+      }
 
       // Show helpful hints based on error
       if (errorMsg.includes('Minimum 2 approved candidates')) {
@@ -594,10 +683,20 @@ const Admin: React.FC = () => {
       fetchSectionWiseCandidates();
       fetchPendingCandidates();
     } catch (err: any) {
+      if (isTransportError(err) && await verifyCandidateApproved(candidateId)) {
+        setShowAlert({
+          type: 'success',
+          title: 'Success',
+          message: 'Candidate approved successfully.\n\nThe action completed, but the server response was delayed.'
+        });
+        fetchSectionWiseCandidates();
+        fetchPendingCandidates();
+        return;
+      }
       setShowAlert({
         type: 'error',
         title: 'Error',
-        message: err.response?.data?.detail || 'Failed to update candidate.'
+        message: getApiErrorMessage(err, 'Failed to update candidate.')
       });
     }
   };
@@ -704,10 +803,21 @@ const Admin: React.FC = () => {
       fetchSectionWiseCandidates();
       fetchWindowCandidates();
     } catch (err: any) {
+      if (isTransportError(err) && await verifyCandidateApproved(id)) {
+        setShowAlert({
+          type: 'success',
+          title: 'Success',
+          message: 'Candidate approved successfully.\n\nThe action completed, but the server response was delayed.'
+        });
+        fetchPendingCandidates();
+        fetchSectionWiseCandidates();
+        fetchWindowCandidates();
+        return;
+      }
       setShowAlert({
         type: 'error',
         title: 'Error',
-        message: err.response?.data?.detail || 'Failed to update candidate.'
+        message: getApiErrorMessage(err, 'Failed to update candidate.')
       });
     }
   };
@@ -1146,7 +1256,7 @@ const Admin: React.FC = () => {
                               </span>
                             </td>
                             <td className="px-6 py-4 text-zinc-500 dark:text-zinc-400 font-mono text-[13px] font-bold">
-                              {new Date(o.end_time).toLocaleString()}
+                              {formatIndianDateTime(o.end_time)}
                             </td>
                             <td className="px-6 py-4 text-zinc-600 dark:text-zinc-400 text-[14px] italic max-w-md truncate">
                               {o.reason || 'N/A'}
@@ -1225,7 +1335,7 @@ const Admin: React.FC = () => {
                                   {e.branch} - Sec {e.section}
                                 </p>
                                 <p className="text-zinc-500 dark:text-zinc-400 font-mono text-[12px] mt-1">
-                                  Ends: {new Date(e.end_time).toLocaleString()}
+                                  Ends: {formatIndianDateTime(e.end_time)}
                                 </p>
                               </div>
                             </div>
@@ -1675,4 +1785,3 @@ const Admin: React.FC = () => {
 };
 
 export default Admin;
-

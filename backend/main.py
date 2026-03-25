@@ -147,7 +147,7 @@ frontend_origins_env = os.getenv(
     "FRONTEND_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173"
 )
-origins = os.getenv("FRONTEND_ORIGINS", "").split(",")
+origins = [origin.strip().rstrip("/") for origin in frontend_origins_env.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -1161,10 +1161,22 @@ def force_stop_election(election_id: int, db: Session = Depends(database.get_db)
 
 @app.get("/admin/elections")
 def list_elections(db: Session = Depends(database.get_db)):
-    """List all elections."""
+    """
+    List elections visible in admin history.
+    Hide auto-created placeholder elections until admin actually starts them.
+    """
     elections = db.query(models.Election).order_by(
         models.Election.created_at.desc()
     ).all()
+    now = datetime.utcnow()
+
+    started_election_ids = {
+        int(row[0]) for row in db.query(models.AuditLog.entity_id).filter(
+            models.AuditLog.entity_type == "Election",
+            models.AuditLog.action == "START",
+            models.AuditLog.entity_id.isnot(None)
+        ).all()
+    }
 
     return {
         "elections": [
@@ -1175,8 +1187,9 @@ def list_elections(db: Session = Depends(database.get_db)):
                 "start_time": e.start_time.isoformat(),
                 "end_time": e.end_time.isoformat(),
                 "is_active": e.is_active,
-                "status": "active" if is_election_active(e) else ("completed" if e.end_time < datetime.utcnow() else "scheduled")
+                "status": "active" if is_election_active(e) else ("completed" if e.end_time < now else "scheduled")
             } for e in elections
+            if e.id in started_election_ids or is_election_active(e)
         ]
     }
 
@@ -3224,4 +3237,3 @@ async def global_websocket(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
