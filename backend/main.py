@@ -180,7 +180,14 @@ class VoteRequest(BaseModel):
     election_id: int
     candidate_id: Optional[int] = None  # None for NOTA
     is_nota: bool = False  # Flag for NOTA vote
-    student_usn: Optional[str] = None  # Can be in body or query param
+    token: str
+    signature: str
+
+
+class TokenRequest(BaseModel):
+    election_id: int
+    blinded_token: str
+    student_usn: Optional[str] = None
 
 
 class CandidateRegistrationRequest(BaseModel):
@@ -818,104 +825,118 @@ def get_active_elections(branch: str, section: str, db: Session = Depends(databa
     }
 
 
-@app.post("/vote")
-def cast_vote(request: VoteRequest, student_usn: Optional[str] = None, db: Session = Depends(database.get_db)):
-    """
-    Cast a vote with strict restrictions.
-    Supports NOTA (None of the Above) option.
-    Student USN can be provided via query param or request body.
-    """
-    # Get student USN from body or query param
+import blind_rsa
+
+@app.get("/public/rsa-key")
+def get_rsa_public_key():
+    return blind_rsa.get_public_key()
+
+@app.post("/vote/request-token")
+def request_voting_token(request: TokenRequest, student_usn: Optional[str] = None, db: Session = Depends(database.get_db)):
+    """Step 1: Student requests authorization to vote. Returns a blind signature."""
     usn = request.student_usn or student_usn
-    
     if not usn:
-        raise HTTPException(status_code=400, detail="Student USN is required. Please login again.")
+        raise HTTPException(status_code=400, detail="Student USN is required.")
     
-    # Get the student
     student = db.query(models.Student).filter(models.Student.usn == usn).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+        
+    election = db.query(models.Election).filter(models.Election.id == request.election_id).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+        
+    now = datetime.utcnow()
+    if not election.is_active or not (election.start_time <= now <= election.end_time):
+        raise HTTPException(status_code=400, detail="This election is not active.")
+        
+    from auth import hash_usn_for_receipt
+    usn_hash = hash_usn_for_receipt(student.usn, election.id)
     
-    # Check if student already voted
-    if student.has_voted:
-        raise HTTPException(status_code=400, detail="You have already voted. Each student can only vote once.")
-    
-    election = db.query(models.Election).filter(
-        models.Election.id == request.election_id
+    # Check if student already got a token (VoteReceipt acts as authorization receipt now)
+    existing_receipt = db.query(models.VoteReceipt).filter(
+        models.VoteReceipt.student_usn_hash == usn_hash,
+        models.VoteReceipt.election_id == election.id
     ).first()
+    if existing_receipt:
+        raise HTTPException(status_code=400, detail="You have already requested a voting token for this election.")
+        
+    # Sign the token
+    try:
+        signature_hex = blind_rsa.sign_blinded_token(request.blinded_token)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid token format")
+        
+    # Record authorization
+    vote_receipt = models.VoteReceipt(
+        student_usn_hash=usn_hash,
+        election_id=request.election_id
+    )
+    db.add(vote_receipt)
+    student.has_voted = True  # Prevent asking for another token
+    db.commit()
+    
+    return {
+        "signature": signature_hex,
+        "message": "Token authorized successfully."
+    }
+
+@app.post("/vote")
+def cast_vote(request: VoteRequest, db: Session = Depends(database.get_db)):
+    """Step 2: Anonymous voting using the unblinded token and signature."""
+    election = db.query(models.Election).filter(models.Election.id == request.election_id).first()
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
 
-    # Check if election is active
     now = datetime.utcnow()
     if not election.is_active or not (election.start_time <= now <= election.end_time):
-        raise HTTPException(status_code=400, detail="This election is not active. Voting may have ended or not started yet.")
-    
-    # Handle NOTA vote
+        raise HTTPException(status_code=400, detail="This election is not active.")
+        
+    # Verify cryptographic signature
+    if not blind_rsa.verify_token_signature(request.token, request.signature):
+        raise HTTPException(status_code=401, detail="Invalid or unauthorized voting token signature.")
+        
+    # Prevent double spending
+    import hashlib
+    token_hash = hashlib.sha256(request.token.encode()).hexdigest()
+    existing_vote = db.query(models.Vote).filter(models.Vote.voting_token_hash == token_hash).first()
+    if existing_vote:
+        raise HTTPException(status_code=400, detail="This voting token has already been used.")
+
     if request.is_nota:
         candidate_id = None
     else:
-        # Verify candidate belongs to this election and is approved
         if not request.candidate_id:
             raise HTTPException(status_code=400, detail="Invalid vote: must select a candidate or NOTA")
-        
         candidate = db.query(models.Candidate).filter(
             models.Candidate.id == request.candidate_id,
             models.Candidate.election_id == request.election_id,
             models.Candidate.approved == True
         ).first()
         if not candidate:
-            raise HTTPException(status_code=400, detail="Invalid candidate. This candidate may not be approved or doesn't belong to this election.")
+            raise HTTPException(status_code=400, detail="Invalid candidate.")
         candidate_id = request.candidate_id
-    
-    # Check if student already has a vote receipt for this election (double-vote prevention)
-    from auth import hash_usn_for_receipt
-    usn_hash = hash_usn_for_receipt(student.usn, election.id)
-    existing_receipt = db.query(models.VoteReceipt).filter(
-        models.VoteReceipt.student_usn_hash == usn_hash,
-        models.VoteReceipt.election_id == election.id
-    ).first()
-    if existing_receipt:
-        raise HTTPException(status_code=400, detail="You have already voted in this election.")
-    
-    # Get the last vote for this election to create hash chain
-    last_vote = db.query(models.Vote).filter(
-        models.Vote.election_id == election.id
-    ).order_by(models.Vote.cast_at.desc()).first()
-    
+        
+    last_vote = db.query(models.Vote).filter(models.Vote.election_id == election.id).order_by(models.Vote.cast_at.desc()).first()
     previous_hash = last_vote.vote_hash if last_vote else None
     cast_at = datetime.utcnow()
     
-    # Create vote hash for chain integrity
-    from auth import create_vote_hash
+    from auth import create_vote_hash, generate_receipt_code, build_merkle_tree
     vote_hash = create_vote_hash(election.id, candidate_id or -1, cast_at.isoformat(), previous_hash)
 
     try:
-        # Create vote with hash chain (candidate_id can be None for NOTA)
         new_vote = models.Vote(
             election_id=request.election_id,
-            candidate_id=candidate_id,  # None for NOTA
+            candidate_id=candidate_id,
             cast_at=cast_at,
             previous_hash=previous_hash,
-            vote_hash=vote_hash
+            vote_hash=vote_hash,
+            voting_token_hash=token_hash
         )
         db.add(new_vote)
-        db.flush()  # Ensure new_vote.id is available for receipt-code row
+        db.flush()
 
-        # Create vote receipt (anonymous record that this student voted)
-        vote_receipt = models.VoteReceipt(
-            student_usn_hash=usn_hash,
-            election_id=request.election_id
-        )
-        db.add(vote_receipt)
-
-        # Mark student as having voted
-        student.has_voted = True
-
-        # Generate vote receipt code
-        from auth import generate_receipt_code
         receipt_code = generate_receipt_code()
-
         vote_receipt_code = models.VoteReceiptCode(
             vote_id=new_vote.id,
             election_id=request.election_id,
@@ -923,20 +944,12 @@ def cast_vote(request: VoteRequest, student_usn: Optional[str] = None, db: Sessi
         )
         db.add(vote_receipt_code)
 
-        # Build/update Merkle tree for this election (same transaction)
-        votes = db.query(models.Vote).filter(
-            models.Vote.election_id == request.election_id
-        ).order_by(models.Vote.cast_at).all()
-
+        # Update Merkle tree
+        votes = db.query(models.Vote).filter(models.Vote.election_id == request.election_id).order_by(models.Vote.cast_at).all()
         vote_hashes = [v.vote_hash for v in votes]
-        from auth import build_merkle_tree
         merkle_data = build_merkle_tree(vote_hashes)
 
-        # Update or create Merkle tree record
-        merkle_tree = db.query(models.MerkleTree).filter(
-            models.MerkleTree.election_id == request.election_id
-        ).first()
-
+        merkle_tree = db.query(models.MerkleTree).filter(models.MerkleTree.election_id == request.election_id).first()
         if merkle_tree:
             merkle_tree.root_hash = merkle_data["root_hash"]
             merkle_tree.tree_data = json.dumps(merkle_data["tree"])
@@ -949,41 +962,37 @@ def cast_vote(request: VoteRequest, student_usn: Optional[str] = None, db: Sessi
                 vote_count=len(votes)
             )
             db.add(merkle_tree)
+            
+        # Update SectionElectionRecord
+        academic_year = f"{cast_at.year - 1 if cast_at.month < 4 else cast_at.year}-{cast_at.year + 1 if cast_at.month < 4 else cast_at.year + 1}"
+        section_record = db.query(models.SectionElectionRecord).filter(
+            models.SectionElectionRecord.branch == election.branch,
+            models.SectionElectionRecord.section == election.section,
+            models.SectionElectionRecord.academic_year == academic_year
+        ).first()
+
+        if section_record:
+            total_voters = db.query(models.Student).filter(
+                models.Student.branch == election.branch,
+                models.Student.section == election.section,
+                models.Student.is_admin == False,
+                models.Student.has_voted == True
+            ).count()
+            total_students = db.query(models.Student).filter(
+                models.Student.branch == election.branch,
+                models.Student.section == election.section,
+                models.Student.is_admin == False
+            ).count()
+            turnout_percentage = round((total_voters / total_students * 100), 2) if total_students > 0 else 0
+            section_record.total_voters = total_voters
+            section_record.turnout_percentage = turnout_percentage
+            section_record.updated_at = cast_at
 
         db.commit()
-    except IntegrityError as exc:
+    except Exception as e:
         db.rollback()
-        error_text = str(getattr(exc, "orig", exc)).lower()
+        raise HTTPException(status_code=500, detail="Failed to cast vote due to a server error. Please retry.")
 
-        # Friendly duplicate-vote message even when DB uniqueness triggers first.
-        if (
-            "unique_vote_per_student_per_election" in error_text
-            or "vote_receipts" in error_text
-            or "student_usn_hash" in error_text
-        ):
-            raise HTTPException(status_code=400, detail="You have already voted in this election.")
-
-        # DB schema mismatch fallback: NOTA needs nullable candidate_id.
-        if request.is_nota and "candidate_id" in error_text and "null" in error_text:
-            raise HTTPException(
-                status_code=500,
-                detail="NOTA vote is temporarily unavailable due to database schema mismatch. Please contact admin."
-            )
-
-        logger.exception("Vote integrity/persistence error")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to cast vote due to a data integrity error. Please retry."
-        )
-    except Exception:
-        db.rollback()
-        logger.exception("Unexpected error while casting vote")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to cast vote due to a server error. Please retry."
-        )
-
-    # Broadcast real-time update
     run_async_safely(
         lambda: manager.broadcast_to_election(
             request.election_id,
@@ -1006,7 +1015,6 @@ def cast_vote(request: VoteRequest, student_usn: Optional[str] = None, db: Sessi
         "is_nota": request.is_nota,
         "merkle_root": merkle_data["root_hash"]
     }
-
 
 # ============== Admin Endpoints ==============
 
@@ -1042,7 +1050,18 @@ def create_election(request: ElectionCreateRequest, db: Session = Depends(databa
             detail="Warning: Cannot start election: Candidate registration is still open for this section. Please close registration first."
         )
     
-    # RESTRICTION 3: Check if there's already an active election
+    # RESTRICTION 3: Check if there's already an active election FOR ANY SECTION
+    # Prevent starting a new election if any section currently has an active election
+    existing_active_any = db.query(models.Election).filter(
+        models.Election.is_active == True
+    ).first()
+    if existing_active_any:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Warning: Cannot start election - there is already an active election running for {existing_active_any.branch}-{existing_active_any.section}. Please stop the current election first before starting a new one."
+        )
+
+    # RESTRICTION 3b: Also check if there's already an active election for this specific section (legacy check)
     existing_active = db.query(models.Election).filter(
         models.Election.branch == request.branch,
         models.Election.section == request.section,
@@ -1080,17 +1099,22 @@ def create_election(request: ElectionCreateRequest, db: Session = Depends(databa
         models.Election.section == request.section
     ).order_by(models.Election.created_at.desc()).first()
 
+    # If there's a previous election, check its approved candidates
+    # If there's no previous election, there are definitely no candidates
     if latest_election:
         approved_candidate_count = db.query(models.Candidate).filter(
             models.Candidate.election_id == latest_election.id,
             models.Candidate.approved == True
         ).count()
+    else:
+        # No election exists yet, so no candidates have registered
+        approved_candidate_count = 0
 
-        if approved_candidate_count < 2:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Warning: Cannot start election: Minimum 2 approved candidates are required for {request.branch}-{request.section}, but only {approved_candidate_count} found.\n\nPlease approve more candidates or re-open registration to allow more students to register."
-            )
+    if approved_candidate_count < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Warning: Cannot start election: Minimum 2 approved candidates are required for {request.branch}-{request.section}, but only {approved_candidate_count} found.\n\nPlease approve more candidates or re-open registration to allow more students to register."
+        )
 
     # Deactivate any existing elections for this section
     db.query(models.Election).filter(
@@ -1121,6 +1145,48 @@ def create_election(request: ElectionCreateRequest, db: Session = Depends(databa
 
     db.commit()
     db.refresh(election)
+
+    # Sync with SectionElectionRecord - Update status to election_active
+    from datetime import datetime as dt
+    now_sync = dt.utcnow()
+    academic_year = f"{now_sync.year - 1 if now_sync.month < 4 else now_sync.year}-{now_sync.year + 1 if now_sync.month < 4 else now_sync.year + 1}"
+
+    section_record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.branch == request.branch,
+        models.SectionElectionRecord.section == request.section,
+        models.SectionElectionRecord.academic_year == academic_year
+    ).first()
+
+    if section_record:
+        section_record.status = "election_active"
+        section_record.election_id = election.id
+        section_record.election_started = start_time
+        section_record.total_students = db.query(models.Student).filter(
+            models.Student.branch == request.branch,
+            models.Student.section == request.section,
+            models.Student.is_admin == False
+        ).count()
+        section_record.updated_at = start_time
+    else:
+        # Create new section record if it doesn't exist
+        total_students = db.query(models.Student).filter(
+            models.Student.branch == request.branch,
+            models.Student.section == request.section,
+            models.Student.is_admin == False
+        ).count()
+        
+        section_record = models.SectionElectionRecord(
+            branch=request.branch,
+            section=request.section,
+            academic_year=academic_year,
+            election_id=election.id,
+            total_students=total_students,
+            status="election_active",
+            election_started=start_time
+        )
+        db.add(section_record)
+
+    db.commit()
 
     # Log the election start
     log_audit(db, "START", "Election", election.id, "admin",
@@ -1166,14 +1232,95 @@ def force_stop_election(election_id: int, db: Session = Depends(database.get_db)
     ).first()
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    
+
     if not election.is_active:
         raise HTTPException(status_code=400, detail="Election is not currently active")
-    
+
     # Update election end time to now
-    election.end_time = datetime.utcnow()
+    stopped_at = datetime.utcnow()
+    election.end_time = stopped_at
     election.is_active = False
     db.commit()
+
+    # Calculate final results and sync with SectionElectionRecord
+    from sqlalchemy import func
+    
+    # Get total voters (students who voted)
+    total_voters = db.query(models.Student).filter(
+        models.Student.branch == election.branch,
+        models.Student.section == election.section,
+        models.Student.is_admin == False,
+        models.Student.has_voted == True
+    ).count()
+
+    # Get total eligible students
+    total_students = db.query(models.Student).filter(
+        models.Student.branch == election.branch,
+        models.Student.section == election.section,
+        models.Student.is_admin == False
+    ).count()
+
+    # Calculate turnout
+    turnout_percentage = round((total_voters / total_students * 100), 2) if total_students > 0 else 0
+
+    # Get winner and runner-up
+    candidate_results = db.query(
+        models.Candidate.id,
+        models.Student.name,
+        func.count(models.Vote.id).label('vote_count')
+    ).join(
+        models.Student, models.Candidate.student_id == models.Student.id
+    ).join(
+        models.Vote, models.Candidate.id == models.Vote.candidate_id
+    ).filter(
+        models.Candidate.election_id == election.id
+    ).group_by(
+        models.Candidate.id, models.Student.name
+    ).order_by(
+        func.count(models.Vote.id).desc()
+    ).all()
+
+    winner_name = None
+    winner_votes = 0
+    runner_up_name = None
+    runner_up_votes = 0
+
+    if len(candidate_results) >= 1:
+        winner_name = candidate_results[0].name
+        winner_votes = candidate_results[0].vote_count
+    if len(candidate_results) >= 2:
+        runner_up_name = candidate_results[1].name
+        runner_up_votes = candidate_results[1].vote_count
+
+    # Get NOTA votes
+    nota_count = db.query(func.count(models.Vote.id)).filter(
+        models.Vote.election_id == election.id,
+        models.Vote.candidate_id == None
+    ).scalar() or 0
+
+    # Sync with SectionElectionRecord
+    from datetime import datetime as dt
+    now_sync = dt.utcnow()
+    academic_year = f"{now_sync.year - 1 if now_sync.month < 4 else now_sync.year}-{now_sync.year + 1 if now_sync.month < 4 else now_sync.year + 1}"
+
+    section_record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.branch == election.branch,
+        models.SectionElectionRecord.section == election.section,
+        models.SectionElectionRecord.academic_year == academic_year
+    ).first()
+
+    if section_record:
+        section_record.status = "completed"
+        section_record.election_ended = stopped_at
+        section_record.total_voters = total_voters
+        section_record.turnout_percentage = turnout_percentage
+        section_record.winner_name = winner_name
+        section_record.winner_votes = winner_votes
+        section_record.runner_up_name = runner_up_name
+        section_record.runner_up_votes = runner_up_votes
+        section_record.nota_votes = nota_count
+        section_record.updated_at = stopped_at
+        db.commit()
 
     # Broadcast real-time update
     run_async_safely(
@@ -1182,6 +1329,8 @@ def force_stop_election(election_id: int, db: Session = Depends(database.get_db)
             {
                 "type": "election_stopped",
                 "election_id": election_id,
+                "branch": election.branch,
+                "section": election.section,
                 "message": "Election stopped successfully",
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -1206,7 +1355,7 @@ def list_elections(db: Session = Depends(database.get_db)):
     elections = db.query(models.Election).order_by(
         models.Election.created_at.desc()
     ).all()
-    now = datetime.utcnow()
+    now = get_current_indian_time()
 
     started_election_ids = {
         int(row[0]) for row in db.query(models.AuditLog.entity_id).filter(
@@ -1222,10 +1371,10 @@ def list_elections(db: Session = Depends(database.get_db)):
                 "id": e.id,
                 "branch": e.branch,
                 "section": e.section,
-                "start_time": e.start_time.isoformat(),
-                "end_time": e.end_time.isoformat(),
+                "start_time": format_indian_time(e.start_time),
+                "end_time": format_indian_time(e.end_time),
                 "is_active": e.is_active,
-                "status": "active" if is_election_active(e) else ("completed" if e.end_time < now else "scheduled")
+                "status": "active" if is_election_active(e) else "completed"
             } for e in elections
             if e.id in started_election_ids or is_election_active(e)
         ]
@@ -1453,6 +1602,41 @@ def open_candidature_window(request: CandidatureWindowRequest, db: Session = Dep
         db.add(window)
         db.commit()
         db.refresh(window)
+
+    # Create or update section election record
+    from datetime import datetime as dt
+    now = dt.utcnow()
+    academic_year = f"{now.year - 1 if now.month < 4 else now.year}-{now.year + 1 if now.month < 4 else now.year + 1}"
+    
+    record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.branch == request.branch,
+        models.SectionElectionRecord.section == request.section,
+        models.SectionElectionRecord.academic_year == academic_year
+    ).first()
+    
+    total_students = db.query(models.Student).filter(
+        models.Student.branch == request.branch,
+        models.Student.section == request.section,
+        models.Student.is_admin == False
+    ).count()
+    
+    if record:
+        record.status = "registration_open"
+        record.registration_opened = start_time
+        record.total_students = total_students
+        record.updated_at = start_time
+    else:
+        record = models.SectionElectionRecord(
+            branch=request.branch,
+            section=request.section,
+            academic_year=academic_year,
+            total_students=total_students,
+            status="registration_open",
+            registration_opened=start_time
+        )
+        db.add(record)
+    
+    db.commit()
 
     return {
         "message": "Candidature window opened successfully",
@@ -2485,6 +2669,1451 @@ def get_public_vote_ledger(election_id: int, db: Session = Depends(database.get_
         "ledger": ledger,
         "verification_note": "This ledger contains anonymous vote data. Use it to independently verify election results.",
         "timezone": "Indian Standard Time (IST)"
+    }
+
+
+# ============== Dashboard & Statistics Endpoints ==============
+
+class DashboardStats(BaseModel):
+    """Real-time dashboard statistics."""
+    total_elections: int
+    active_elections: int
+    upcoming_elections: int
+    completed_elections: int
+    total_students: int
+    total_voters: int
+    total_candidates: int
+    pending_approvals: int
+    global_registration_open: bool
+    system_status: str
+
+
+class ElectionStats(BaseModel):
+    """Detailed election statistics."""
+    election_id: int
+    branch: str
+    section: str
+    status: str
+    eligible_voters: int
+    votes_cast: int
+    turnout_percentage: float
+    total_candidates: int
+    approved_candidates: int
+    pending_candidates: int
+    time_remaining_seconds: int
+    votes_per_minute: float
+    last_vote_time: Optional[str]
+    leading_candidate: Optional[str]
+    leading_candidate_votes: int
+
+
+@app.get("/admin/dashboard/stats")
+def get_dashboard_statistics(db: Session = Depends(database.get_db)):
+    """
+    Get comprehensive real-time dashboard statistics.
+    Provides overview of entire election system status.
+    """
+    from sqlalchemy import func
+
+    # Count elections by status - Use IST for time comparisons
+    now = get_current_indian_time()
+
+    total_elections = db.query(models.Election).count()
+
+    # Active elections (currently running) - Convert election times to IST for comparison
+    active_elections = 0
+    upcoming_elections = 0
+    completed_elections = 0
+    
+    all_elections = db.query(models.Election).all()
+    for election in all_elections:
+        # Convert election times to IST for proper comparison
+        if election.start_time.tzinfo is None:
+            start_ist = election.start_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            start_ist = election.start_time.astimezone(timezone(IST_OFFSET))
+            
+        if election.end_time.tzinfo is None:
+            end_ist = election.end_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            end_ist = election.end_time.astimezone(timezone(IST_OFFSET))
+        
+        # Check if election is active based on time
+        if election.is_active and start_ist <= now <= end_ist:
+            active_elections += 1
+        elif start_ist > now:
+            upcoming_elections += 1
+        else:
+            completed_elections += 1
+
+    # Student statistics
+    total_students = db.query(models.Student).filter(
+        models.Student.is_admin == False
+    ).count()
+
+    total_voters = db.query(models.Student).filter(
+        models.Student.is_admin == False,
+        models.Student.has_voted == True
+    ).count()
+
+    # Candidate statistics
+    total_candidates = db.query(models.Candidate).count()
+    pending_approvals = db.query(models.Candidate).filter(
+        models.Candidate.approved == False
+    ).count()
+
+    # Global registration status
+    global_reg = db.query(models.GlobalRegistrationWindow).order_by(
+        models.GlobalRegistrationWindow.created_at.desc()
+    ).first()
+
+    global_registration_open = False
+    if global_reg:
+        if global_reg.start_time.tzinfo is None:
+            start_ist = global_reg.start_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            start_ist = global_reg.start_time.astimezone(timezone(IST_OFFSET))
+            
+        if global_reg.end_time.tzinfo is None:
+            end_ist = global_reg.end_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            end_ist = global_reg.end_time.astimezone(timezone(IST_OFFSET))
+            
+        global_registration_open = (
+            global_reg.is_open and
+            start_ist <= now <= end_ist
+        )
+
+    # Determine system status
+    if active_elections > 0:
+        system_status = "active"
+    elif global_registration_open:
+        system_status = "registration_open"
+    elif upcoming_elections > 0:
+        system_status = "upcoming"
+    else:
+        system_status = "idle"
+
+    return {
+        "statistics": {
+            "total_elections": total_elections,
+            "active_elections": active_elections,
+            "upcoming_elections": upcoming_elections,
+            "completed_elections": completed_elections,
+            "total_students": total_students,
+            "total_voters": total_voters,
+            "total_candidates": total_candidates,
+            "pending_approvals": pending_approvals,
+            "global_registration_open": global_registration_open,
+            "system_status": system_status
+        },
+        "timestamp": format_indian_time(now),
+        "timestamp_utc": now.isoformat()
+    }
+
+
+@app.get("/admin/dashboard/elections")
+def get_dashboard_elections(db: Session = Depends(database.get_db)):
+    """
+    Get all elections with real-time statistics for dashboard display.
+    Includes status, turnout, and key metrics for each election.
+    """
+    from sqlalchemy import func
+
+    now = get_current_indian_time()
+
+    elections = db.query(models.Election).order_by(
+        models.Election.created_at.desc()
+    ).all()
+
+    election_stats = []
+
+    for election in elections:
+        # Convert election times to IST for proper comparison
+        if election.start_time.tzinfo is None:
+            start_ist = election.start_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            start_ist = election.start_time.astimezone(timezone(IST_OFFSET))
+            
+        if election.end_time.tzinfo is None:
+            end_ist = election.end_time.replace(tzinfo=timezone.utc).astimezone(timezone(IST_OFFSET))
+        else:
+            end_ist = election.end_time.astimezone(timezone(IST_OFFSET))
+        
+        # Determine status based on IST
+        if start_ist > now:
+            status = "upcoming"
+        elif end_ist < now:
+            status = "completed"
+        elif election.is_active and start_ist <= now <= end_ist:
+            status = "active"
+        else:
+            status = "completed"
+
+        # Count eligible voters
+        eligible_voters = db.query(models.Student).filter(
+            models.Student.branch == election.branch,
+            models.Student.section == election.section,
+            models.Student.is_admin == False
+        ).count()
+
+        # Count actual voters
+        votes_cast = db.query(models.VoteReceipt).filter(
+            models.VoteReceipt.election_id == election.id
+        ).count()
+
+        # Calculate turnout
+        turnout_percentage = round((votes_cast / eligible_voters * 100), 2) if eligible_voters > 0 else 0
+
+        # Count candidates
+        total_candidates = db.query(models.Candidate).filter(
+            models.Candidate.election_id == election.id
+        ).count()
+
+        approved_candidates = db.query(models.Candidate).filter(
+            models.Candidate.election_id == election.id,
+            models.Candidate.approved == True
+        ).count()
+
+        pending_candidates = db.query(models.Candidate).filter(
+            models.Candidate.election_id == election.id,
+            models.Candidate.approved == False
+        ).count()
+
+        # Time remaining (calculate in IST)
+        if status == "active":
+            time_remaining = int((end_ist - now).total_seconds())
+        elif status == "upcoming":
+            time_remaining = int((start_ist - now).total_seconds())
+        else:
+            time_remaining = 0
+
+        # Votes per minute
+        if status == "active" and time_remaining > 0:
+            election_duration = (end_ist - start_ist).total_seconds() / 60
+            votes_per_minute = round(votes_cast / election_duration, 2) if election_duration > 0 else 0
+        else:
+            votes_per_minute = 0
+
+        # Last vote time
+        last_vote = db.query(models.Vote).filter(
+            models.Vote.election_id == election.id
+        ).order_by(models.Vote.cast_at.desc()).first()
+        last_vote_time = format_indian_time(last_vote.cast_at) if last_vote else None
+
+        # Leading candidate
+        leading_candidate = None
+        leading_candidate_votes = 0
+
+        if votes_cast > 0:
+            candidate_votes = db.query(
+                models.Candidate.id,
+                func.count(models.Vote.id).label('vote_count')
+            ).join(
+                models.Student, models.Candidate.student_id == models.Student.id
+            ).join(
+                models.Vote, models.Candidate.id == models.Vote.candidate_id
+            ).filter(
+                models.Candidate.election_id == election.id
+            ).group_by(
+                models.Candidate.id
+            ).order_by(
+                func.count(models.Vote.id).desc()
+            ).first()
+
+            if candidate_votes:
+                candidate = db.query(models.Student).filter(
+                    models.Student.id == candidate_votes.id
+                ).first()
+                if candidate:
+                    leading_candidate = candidate.name
+                    leading_candidate_votes = candidate_votes.vote_count
+
+        election_stats.append({
+            "election_id": election.id,
+            "branch": election.branch,
+            "section": election.section,
+            "status": status,
+            "eligible_voters": eligible_voters,
+            "votes_cast": votes_cast,
+            "turnout_percentage": turnout_percentage,
+            "total_candidates": total_candidates,
+            "approved_candidates": approved_candidates,
+            "pending_candidates": pending_candidates,
+            "time_remaining_seconds": time_remaining,
+            "votes_per_minute": votes_per_minute,
+            "last_vote_time": last_vote_time,
+            "leading_candidate": leading_candidate,
+            "leading_candidate_votes": leading_candidate_votes,
+            "start_time": format_indian_time(election.start_time),
+            "end_time": format_indian_time(election.end_time)
+        })
+
+    return {
+        "elections": election_stats,
+        "total_count": len(election_stats),
+        "timestamp": format_indian_time(now),
+        "timestamp_utc": now.isoformat()
+    }
+
+
+@app.get("/admin/dashboard/activity-feed")
+def get_recent_activity(limit: int = 20, db: Session = Depends(database.get_db)):
+    """
+    Get recent system activity for dashboard feed.
+    Shows latest votes, candidate registrations, approvals, etc.
+    """
+    from sqlalchemy import union_all
+    
+    # Get recent votes
+    votes = db.query(
+        models.Vote.cast_at.label('timestamp'),
+        models.Vote.id.label('entity_id'),
+        models.Vote.election_id,
+        models.Election.branch,
+        models.Election.section,
+        db.literal('vote').label('activity_type'),
+        db.literal('Vote cast').label('description'),
+        db.literal('blue').label('color')
+    ).join(
+        models.Election, models.Vote.election_id == models.Election.id
+    ).order_by(
+        models.Vote.cast_at.desc()
+    ).limit(limit).all()
+    
+    # Get recent candidate registrations
+    candidates = db.query(
+        models.Candidate.created_at.label('timestamp'),
+        models.Candidate.id.label('entity_id'),
+        models.Candidate.election_id,
+        models.Election.branch,
+        models.Election.section,
+        db.literal('candidate_register').label('activity_type'),
+        db.literal('Candidate registered').label('description'),
+        db.literal('green').label('color')
+    ).join(
+        models.Election, models.Candidate.election_id == models.Election.id
+    ).order_by(
+        models.Candidate.created_at.desc()
+    ).limit(limit).all()
+    
+    # Get recent approvals
+    approvals = db.query(
+        models.AuditLog.timestamp.label('timestamp'),
+        models.AuditLog.entity_id,
+        db.literal(None).label('election_id'),
+        db.literal(None).label('branch'),
+        db.literal(None).label('section'),
+        db.literal('approval').label('activity_type'),
+        db.literal('Candidate approved').label('description'),
+        db.literal('emerald').label('color')
+    ).filter(
+        models.AuditLog.action == 'APPROVE',
+        models.AuditLog.entity_type == 'Candidate'
+    ).order_by(
+        models.AuditLog.timestamp.desc()
+    ).limit(limit).all()
+    
+    # Combine and sort
+    all_activities = votes + candidates + approvals
+    all_activities.sort(key=lambda x: x.timestamp, reverse=True)
+    all_activities = all_activities[:limit]
+    
+    activities = []
+    for activity in all_activities:
+        activities.append({
+            "timestamp": format_indian_time(activity.timestamp),
+            "timestamp_utc": activity.timestamp.isoformat(),
+            "entity_id": activity.entity_id,
+            "election_id": activity.election_id,
+            "branch": activity.branch,
+            "section": activity.section,
+            "activity_type": activity.activity_type,
+            "description": activity.description,
+            "color": activity.color
+        })
+    
+    return {
+        "activities": activities,
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/turnout-by-section")
+def get_turnout_by_section(db: Session = Depends(database.get_db)):
+    """
+    Get voter turnout breakdown by branch and section.
+    Useful for identifying participation patterns.
+    """
+    from sqlalchemy import func, distinct
+    
+    # Get all elections grouped by branch/section
+    elections = db.query(
+        models.Election.branch,
+        models.Election.section,
+        func.count(distinct(models.Election.id)).label('election_count')
+    ).group_by(
+        models.Election.branch,
+        models.Election.section
+    ).all()
+    
+    section_data = []
+    
+    for election in elections:
+        # Count eligible voters
+        eligible = db.query(models.Student).filter(
+            models.Student.branch == election.branch,
+            models.Student.section == election.section,
+            models.Student.is_admin == False
+        ).count()
+        
+        # Count voters from all elections in this section
+        voters = db.query(func.count(distinct(models.VoteReceipt.student_usn_hash))).join(
+            models.Election, models.VoteReceipt.election_id == models.Election.id
+        ).filter(
+            models.Election.branch == election.branch,
+            models.Election.section == election.section
+        ).scalar() or 0
+        
+        turnout_percentage = round((voters / eligible * 100), 2) if eligible > 0 else 0
+        
+        section_data.append({
+            "branch": election.branch,
+            "section": election.section,
+            "elections_held": election.election_count,
+            "eligible_voters": eligible,
+            "total_voters": voters,
+            "turnout_percentage": turnout_percentage
+        })
+    
+    # Sort by turnout percentage
+    section_data.sort(key=lambda x: x['turnout_percentage'], reverse=True)
+    
+    return {
+        "sections": section_data,
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/turnout-by-section")
+def get_turnout_by_section(db: Session = Depends(database.get_db)):
+    """
+    Get voter turnout breakdown by branch and section.
+    Useful for identifying participation patterns.
+    """
+    from sqlalchemy import func, distinct
+    
+    # Get all elections grouped by branch/section
+    elections = db.query(
+        models.Election.branch,
+        models.Election.section,
+        func.count(distinct(models.Election.id)).label('election_count')
+    ).group_by(
+        models.Election.branch,
+        models.Election.section
+    ).all()
+    
+    section_data = []
+    
+    for election in elections:
+        # Count eligible voters
+        eligible = db.query(models.Student).filter(
+            models.Student.branch == election.branch,
+            models.Student.section == election.section,
+            models.Student.is_admin == False
+        ).count()
+        
+        # Count voters from all elections in this section
+        voters = db.query(func.count(distinct(models.VoteReceipt.student_usn_hash))).join(
+            models.Election, models.VoteReceipt.election_id == models.Election.id
+        ).filter(
+            models.Election.branch == election.branch,
+            models.Election.section == election.section
+        ).scalar() or 0
+        
+        turnout_percentage = round((voters / eligible * 100), 2) if eligible > 0 else 0
+        
+        section_data.append({
+            "branch": election.branch,
+            "section": election.section,
+            "elections_held": election.election_count,
+            "eligible_voters": eligible,
+            "total_voters": voters,
+            "turnout_percentage": turnout_percentage
+        })
+    
+    # Sort by turnout percentage
+    section_data.sort(key=lambda x: x['turnout_percentage'], reverse=True)
+    
+    return {
+        "sections": section_data,
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/vote-timeline/{election_id}")
+def get_vote_timeline(election_id: int, interval: str = "hour", db: Session = Depends(database.get_db)):
+    """
+    Get vote timeline data for charts.
+    Interval: 'minute', 'hour', or 'day'
+    """
+    from sqlalchemy import func, extract
+    
+    election = db.query(models.Election).filter(
+        models.Election.id == election_id
+    ).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    
+    votes = db.query(models.Vote).filter(
+        models.Vote.election_id == election_id
+    ).order_by(models.Vote.cast_at).all()
+    
+    if interval == "minute":
+        timeline_data = db.query(
+            extract('hour', models.Vote.cast_at).label('hour'),
+            extract('minute', models.Vote.cast_at).label('minute'),
+            func.count(models.Vote.id).label('vote_count')
+        ).filter(
+            models.Vote.election_id == election_id
+        ).group_by(
+            extract('hour', models.Vote.cast_at),
+            extract('minute', models.Vote.cast_at)
+        ).order_by(
+            extract('hour', models.Vote.cast_at),
+            extract('minute', models.Vote.cast_at)
+        ).all()
+        
+        data_points = [
+            {
+                "time": f"{int(t.hour):02d}:{int(t.minute):02d}",
+                "votes": t.vote_count,
+                "cumulative": sum(d.vote_count for d in timeline_data[:i+1])
+            }
+            for i, t in enumerate(timeline_data)
+        ]
+    
+    elif interval == "hour":
+        timeline_data = db.query(
+            extract('hour', models.Vote.cast_at).label('hour'),
+            func.count(models.Vote.id).label('vote_count')
+        ).filter(
+            models.Vote.election_id == election_id
+        ).group_by(
+            extract('hour', models.Vote.cast_at)
+        ).order_by(
+            extract('hour', models.Vote.cast_at)
+        ).all()
+        
+        data_points = [
+            {
+                "time": f"{int(t.hour):02d}:00",
+                "votes": t.vote_count,
+                "cumulative": sum(d.vote_count for d in timeline_data[:i+1])
+            }
+            for i, t in enumerate(timeline_data)
+        ]
+    
+    else:  # day
+        timeline_data = db.query(
+            extract('day', models.Vote.cast_at).label('day'),
+            extract('month', models.Vote.cast_at).label('month'),
+            func.count(models.Vote.id).label('vote_count')
+        ).filter(
+            models.Vote.election_id == election_id
+        ).group_by(
+            extract('day', models.Vote.cast_at),
+            extract('month', models.Vote.cast_at)
+        ).order_by(
+            extract('day', models.Vote.cast_at),
+            extract('month', models.Vote.cast_at)
+        ).all()
+        
+        data_points = [
+            {
+                "time": f"{int(t.day):02d}/{int(t.month):02d}",
+                "votes": t.vote_count,
+                "cumulative": sum(d.vote_count for d in timeline_data[:i+1])
+            }
+            for i, t in enumerate(timeline_data)
+        ]
+    
+    return {
+        "election_id": election_id,
+        "interval": interval,
+        "data_points": data_points,
+        "total_votes": len(votes),
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/candidate-comparison/{election_id}")
+def get_candidate_comparison(election_id: int, db: Session = Depends(database.get_db)):
+    """
+    Get candidate comparison data for charts.
+    Includes votes, percentages, and visual metrics.
+    """
+    from sqlalchemy import func
+    
+    election = db.query(models.Election).filter(
+        models.Election.id == election_id
+    ).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    
+    # Get all candidates with their votes
+    candidate_results = db.query(
+        models.Candidate.id,
+        models.Student.name.label('candidate_name'),
+        models.Student.usn.label('candidate_usn'),
+        func.count(models.Vote.id).label('vote_count')
+    ).join(
+        models.Student, models.Candidate.student_id == models.Student.id
+    ).outerjoin(
+        models.Vote, models.Candidate.id == models.Vote.candidate_id
+    ).filter(
+        models.Candidate.election_id == election_id
+    ).group_by(
+        models.Candidate.id, models.Student.name, models.Student.usn
+    ).order_by(
+        func.count(models.Vote.id).desc()
+    ).all()
+    
+    # Count NOTA votes
+    nota_votes = db.query(func.count(models.Vote.id)).filter(
+        models.Vote.election_id == election_id,
+        models.Vote.candidate_id == None
+    ).scalar() or 0
+    
+    total_votes = sum(r.vote_count for r in candidate_results) + nota_votes
+    
+    candidates_data = []
+    max_votes = max([r.vote_count for r in candidate_results] + [0])
+    
+    for i, r in enumerate(candidate_results):
+        vote_percentage = round((r.vote_count / total_votes * 100), 2) if total_votes > 0 else 0
+        candidates_data.append({
+            "rank": i + 1,
+            "id": r.id,
+            "name": r.candidate_name,
+            "usn": r.candidate_usn,
+            "votes": r.vote_count,
+            "percentage": vote_percentage,
+            "vote_share_angle": round((r.vote_count / total_votes * 360), 2) if total_votes > 0 else 0,
+            "bar_width_percentage": round((r.vote_count / max_votes * 100), 2) if max_votes > 0 else 0,
+            "is_winner": i == 0,
+            "votes_behind_leader": candidate_results[0].vote_count - r.vote_count if i > 0 else 0
+        })
+    
+    # Add NOTA
+    if nota_votes > 0:
+        nota_percentage = round((nota_votes / total_votes * 100), 2) if total_votes > 0 else 0
+        candidates_data.append({
+            "rank": len(candidates_data) + 1,
+            "id": None,
+            "name": "NOTA",
+            "usn": "N/A",
+            "votes": nota_votes,
+            "percentage": nota_percentage,
+            "vote_share_angle": round((nota_votes / total_votes * 360), 2) if total_votes > 0 else 0,
+            "bar_width_percentage": round((nota_votes / max_votes * 100), 2) if max_votes > 0 else 0,
+            "is_winner": False,
+            "votes_behind_leader": candidate_results[0].vote_count - nota_votes,
+            "is_nota": True
+        })
+    
+    return {
+        "election_id": election_id,
+        "total_votes": total_votes,
+        "total_candidates": len(candidate_results),
+        "candidates": candidates_data,
+        "nota_votes": nota_votes,
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/historical-data")
+def get_historical_data(
+    limit: int = 20,
+    status: Optional[str] = None,
+    branch: Optional[str] = None,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Get historical election data with filtering.
+    Supports pagination and status filtering.
+    """
+    from sqlalchemy import func
+    
+    query = db.query(models.Election)
+    
+    if status:
+        now = get_current_indian_time()
+        if status == "completed":
+            query = query.filter(models.Election.end_time < now)
+        elif status == "active":
+            query = query.filter(
+                models.Election.is_active == True,
+                models.Election.start_time <= now,
+                models.Election.end_time >= now
+            )
+        elif status == "upcoming":
+            query = query.filter(models.Election.start_time > now)
+    
+    if branch:
+        query = query.filter(models.Election.branch == branch)
+    
+    elections = query.order_by(
+        models.Election.created_at.desc()
+    ).limit(limit).all()
+    
+    historical_data = []
+    
+    for election in elections:
+        now = get_current_indian_time()
+        
+        # Determine status
+        if election.start_time > now:
+            election_status = "upcoming"
+        elif election.end_time < now:
+            election_status = "completed"
+        else:
+            election_status = "active"
+        
+        # Get vote count
+        vote_count = db.query(func.count(models.Vote.id)).filter(
+            models.Vote.election_id == election.id
+        ).scalar() or 0
+        
+        # Get candidate count
+        candidate_count = db.query(func.count(models.Candidate.id)).filter(
+            models.Candidate.election_id == election.id
+        ).scalar() or 0
+        
+        # Get eligible voters
+        eligible_voters = db.query(func.count(models.Student.id)).filter(
+            models.Student.branch == election.branch,
+            models.Student.section == election.section,
+            models.Student.is_admin == False
+        ).scalar() or 0
+        
+        # Calculate turnout
+        turnout_percentage = round((vote_count / eligible_voters * 100), 2) if eligible_voters > 0 else 0
+        
+        # Get winner
+        winner = None
+        winner_votes = 0
+        
+        if election_status == "completed":
+            winner_result = db.query(
+                models.Student.name,
+                func.count(models.Vote.id).label('vote_count')
+            ).join(
+                models.Candidate, models.Student.id == models.Candidate.student_id
+            ).join(
+                models.Vote, models.Candidate.id == models.Vote.candidate_id
+            ).filter(
+                models.Candidate.election_id == election.id
+            ).group_by(
+                models.Student.id, models.Student.name
+            ).order_by(
+                func.count(models.Vote.id).desc()
+            ).first()
+            
+            if winner_result:
+                winner = winner_result.name
+                winner_votes = winner_result.vote_count
+        
+        historical_data.append({
+            "election_id": election.id,
+            "branch": election.branch,
+            "section": election.section,
+            "status": election_status,
+            "start_time": format_indian_time(election.start_time),
+            "end_time": format_indian_time(election.end_time),
+            "duration_minutes": int((election.end_time - election.start_time).total_seconds() / 60),
+            "total_candidates": candidate_count,
+            "total_votes": vote_count,
+            "eligible_voters": eligible_voters,
+            "turnout_percentage": turnout_percentage,
+            "winner": winner,
+            "winner_votes": winner_votes,
+            "created_at": format_indian_time(election.created_at)
+        })
+    
+    return {
+        "elections": historical_data,
+        "total_count": len(historical_data),
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/dashboard/predictive-analytics/{election_id}")
+def get_predictive_analytics(election_id: int, db: Session = Depends(database.get_db)):
+    """
+    Get predictive analytics for an election.
+    Includes projected turnout, winner prediction, and voting trends.
+    """
+    from sqlalchemy import func
+    
+    election = db.query(models.Election).filter(
+        models.Election.id == election_id
+    ).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    
+    now = get_current_indian_time()
+    
+    # Basic metrics
+    eligible_voters = db.query(models.Student).filter(
+        models.Student.branch == election.branch,
+        models.Student.section == election.section,
+        models.Student.is_admin == False
+    ).count()
+    
+    current_votes = db.query(func.count(models.VoteReceipt.id)).filter(
+        models.VoteReceipt.election_id == election_id
+    ).scalar() or 0
+    
+    current_turnout = round((current_votes / eligible_voters * 100), 2) if eligible_voters > 0 else 0
+    
+    # Time calculations
+    total_duration = (election.end_time - election.start_time).total_seconds()
+    elapsed_time = (now - election.start_time).total_seconds() if now > election.start_time else 0
+    remaining_time = (election.end_time - now).total_seconds() if now < election.end_time else 0
+    
+    # Voting rate (votes per hour)
+    if elapsed_time > 0:
+        voting_rate_per_hour = current_votes / (elapsed_time / 3600)
+    else:
+        voting_rate_per_hour = 0
+    
+    # Projected final turnout
+    if remaining_time > 0 and voting_rate_per_hour > 0:
+        projected_additional_votes = voting_rate_per_hour * (remaining_time / 3600)
+        projected_total_votes = current_votes + projected_additional_votes
+        projected_turnout = round((projected_total_votes / eligible_voters * 100), 2)
+    else:
+        projected_total_votes = current_votes
+        projected_turnout = current_turnout
+    
+    # Cap at 100%
+    if projected_turnout > 100:
+        projected_turnout = 100.0
+        projected_total_votes = eligible_voters
+    
+    # Candidate predictions
+    candidate_results = db.query(
+        models.Candidate.id,
+        models.Student.name.label('candidate_name'),
+        func.count(models.Vote.id).label('vote_count')
+    ).join(
+        models.Student, models.Candidate.student_id == models.Student.id
+    ).outerjoin(
+        models.Vote, models.Candidate.id == models.Vote.candidate_id
+    ).filter(
+        models.Candidate.election_id == election_id
+    ).group_by(
+        models.Candidate.id, models.Student.name
+    ).order_by(
+        func.count(models.Vote.id).desc()
+    ).all()
+    
+    candidates_predictions = []
+    total_current_votes = sum(r.vote_count for r in candidate_results)
+    
+    for i, r in enumerate(candidate_results):
+        current_percentage = round((r.vote_count / total_current_votes * 100), 2) if total_current_votes > 0 else 0
+        
+        # Simple projection: assume current percentage holds
+        projected_votes = int(projected_total_votes * (current_percentage / 100)) if projected_total_votes > 0 else 0
+        
+        # Calculate win probability (simplified - based on lead and remaining votes)
+        win_probability = 0.0
+        if i == 0 and len(candidate_results) > 1:
+            lead = r.vote_count - candidate_results[1].vote_count
+            remaining_unclaimed = eligible_voters - current_votes
+            if remaining_unclaimed > 0:
+                # If lead is greater than 50% of remaining votes, high probability
+                win_probability = min(99, round((lead / remaining_unclaimed * 100) + 50, 1))
+            else:
+                win_probability = 99.0
+        elif i > 0:
+            leader_votes = candidate_results[0].vote_count
+            remaining_unclaimed = eligible_voters - current_votes
+            gap = leader_votes - r.vote_count
+            if remaining_unclaimed > gap:
+                win_probability = max(1, round(((remaining_unclaimed - gap) / remaining_unclaimed * 50), 1))
+            else:
+                win_probability = 1.0
+        
+        candidates_predictions.append({
+            "rank": i + 1,
+            "id": r.id,
+            "name": r.candidate_name,
+            "current_votes": r.vote_count,
+            "current_percentage": current_percentage,
+            "projected_votes": projected_votes,
+            "projected_percentage": round((projected_votes / projected_total_votes * 100), 2) if projected_total_votes > 0 else 0,
+            "win_probability": win_probability,
+            "is_leading": i == 0,
+            "trend": "stable"  # Could be enhanced with historical trend analysis
+        })
+    
+    # Determine predicted winner
+    predicted_winner = None
+    if candidates_predictions:
+        predicted_winner = {
+            "name": candidates_predictions[0]["name"],
+            "id": candidates_predictions[0]["id"],
+            "win_probability": candidates_predictions[0]["win_probability"],
+            "projected_votes": candidates_predictions[0]["projected_votes"]
+        }
+    
+    # Voting momentum analysis
+    momentum = "neutral"
+    if elapsed_time > 0:
+        # Compare first half vs second half voting rate
+        midpoint = election.start_time + (election.end_time - election.start_time) / 2
+        first_half_votes = db.query(func.count(models.Vote.id)).filter(
+            models.Vote.election_id == election_id,
+            models.Vote.cast_at < midpoint
+        ).scalar() or 0
+        second_half_votes = current_votes - first_half_votes
+        
+        if second_half_votes > first_half_votes * 1.2:
+            momentum = "increasing"
+        elif second_half_votes < first_half_votes * 0.8:
+            momentum = "decreasing"
+    
+    # Peak voting prediction
+    peak_prediction = "afternoon"
+    current_hour = now.hour
+    if 9 <= current_hour < 12:
+        peak_prediction = "midday (12-2 PM)"
+    elif 12 <= current_hour < 15:
+        peak_prediction = "afternoon (2-5 PM)"
+    elif 15 <= current_hour < 18:
+        peak_prediction = "evening (5-7 PM)"
+    
+    return {
+        "election_id": election_id,
+        "election_status": "active" if election.start_time <= now <= election.end_time else ("upcoming" if now < election.start_time else "completed"),
+        "current_metrics": {
+            "eligible_voters": eligible_voters,
+            "current_votes": current_votes,
+            "current_turnout": current_turnout,
+            "elapsed_time_minutes": int(elapsed_time / 60),
+            "remaining_time_minutes": int(remaining_time / 60),
+            "voting_rate_per_hour": round(voting_rate_per_hour, 2)
+        },
+        "projections": {
+            "projected_total_votes": int(projected_total_votes),
+            "projected_turnout": projected_turnout,
+            "projected_voters": int(projected_total_votes - current_votes),
+            "confidence_level": "high" if elapsed_time > total_duration * 0.5 else "medium"
+        },
+        "predicted_winner": predicted_winner,
+        "candidates": candidates_predictions,
+        "momentum": {
+            "status": momentum,
+            "peak_prediction": peak_prediction,
+            "analysis": f"Voting momentum is {momentum}. Peak voting expected during {peak_prediction}."
+        },
+        "timestamp": format_indian_time(now),
+        "timestamp_utc": now.isoformat()
+    }
+
+
+@app.post("/admin/dashboard/export/{election_id}")
+def export_election_data(
+    election_id: int,
+    format: str = "csv",
+    db: Session = Depends(database.get_db)
+):
+    """
+    Export election data as CSV or JSON.
+    """
+    from sqlalchemy import func
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    election = db.query(models.Election).filter(
+        models.Election.id == election_id
+    ).first()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    
+    # Get all data
+    candidate_results = db.query(
+        models.Candidate.id,
+        models.Student.name.label('candidate_name'),
+        models.Student.usn.label('candidate_usn'),
+        func.count(models.Vote.id).label('vote_count')
+    ).join(
+        models.Student, models.Candidate.student_id == models.Student.id
+    ).outerjoin(
+        models.Vote, models.Candidate.id == models.Vote.candidate_id
+    ).filter(
+        models.Candidate.election_id == election_id
+    ).group_by(
+        models.Candidate.id, models.Student.name, models.Student.usn
+    ).order_by(
+        func.count(models.Vote.id).desc()
+    ).all()
+    
+    nota_votes = db.query(func.count(models.Vote.id)).filter(
+        models.Vote.election_id == election_id,
+        models.Vote.candidate_id == None
+    ).scalar() or 0
+    
+    total_votes = sum(r.vote_count for r in candidate_results) + nota_votes
+    
+    if format.lower() == "csv":
+        output = io.StringIO()
+        fieldnames = ['Rank', 'Candidate Name', 'USN', 'Votes', 'Percentage', 'Status']
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        for i, r in enumerate(candidate_results):
+            percentage = round((r.vote_count / total_votes * 100), 2) if total_votes > 0 else 0
+            writer.writerow({
+                'Rank': i + 1,
+                'Candidate Name': r.candidate_name,
+                'USN': r.candidate_usn,
+                'Votes': r.vote_count,
+                'Percentage': f"{percentage}%",
+                'Status': 'Winner' if i == 0 else 'Runner-up'
+            })
+        
+        if nota_votes > 0:
+            percentage = round((nota_votes / total_votes * 100), 2) if total_votes > 0 else 0
+            writer.writerow({
+                'Rank': len(candidate_results) + 1,
+                'Candidate Name': 'NOTA',
+                'USN': 'N/A',
+                'Votes': nota_votes,
+                'Percentage': f"{percentage}%",
+                'Status': ''
+            })
+        
+        output.seek(0)
+        
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=election_{election_id}_results.csv"
+            }
+        )
+    
+    else:  # JSON
+        from fastapi.responses import JSONResponse
+        
+        data = {
+            "election": {
+                "id": election.id,
+                "branch": election.branch,
+                "section": election.section,
+                "start_time": format_indian_time(election.start_time),
+                "end_time": format_indian_time(election.end_time)
+            },
+            "total_votes": total_votes,
+            "results": [
+                {
+                    "rank": i + 1,
+                    "name": r.candidate_name,
+                    "usn": r.candidate_usn,
+                    "votes": r.vote_count,
+                    "percentage": round((r.vote_count / total_votes * 100), 2) if total_votes > 0 else 0,
+                    "status": 'Winner' if i == 0 else 'Runner-up'
+                }
+                for i, r in enumerate(candidate_results)
+            ]
+        }
+        
+        if nota_votes > 0:
+            data["results"].append({
+                "rank": len(candidate_results) + 1,
+                "name": "NOTA",
+                "usn": "N/A",
+                "votes": nota_votes,
+                "percentage": round((nota_votes / total_votes * 100), 2) if total_votes > 0 else 0,
+                "status": ""
+            })
+        
+        return JSONResponse(
+            content=data,
+            headers={
+                "Content-Disposition": f"attachment; filename=election_{election_id}_results.json"
+            }
+        )
+
+
+        return JSONResponse(
+            content=data,
+            headers={
+                "Content-Disposition": f"attachment; filename=election_{election_id}_results.json"
+            }
+        )
+
+
+# ============== Section Election Records Endpoints ==============
+
+class SectionElectionRecordResponse(BaseModel):
+    """Response model for section election records."""
+    id: int
+    branch: str
+    section: str
+    academic_year: str
+    election_id: Optional[int]
+    total_students: int
+    registered_candidates: int
+    approved_candidates: int
+    total_voters: int
+    registration_opened: Optional[str]
+    registration_closed: Optional[str]
+    election_started: Optional[str]
+    election_ended: Optional[str]
+    winner_name: Optional[str]
+    winner_votes: int
+    runner_up_name: Optional[str]
+    runner_up_votes: int
+    nota_votes: int
+    turnout_percentage: float
+    is_reopened: bool
+    reopen_count: int
+    reopen_reason: Optional[str]
+    last_reopen_at: Optional[str]
+    status: str
+    notes: Optional[str]
+    created_at: str
+    updated_at: str
+
+
+class ReopenElectionRequest(BaseModel):
+    """Request model for reopening an election."""
+    reason: str = Field(..., min_length=10, max_length=500)
+    duration_minutes: int = Field(default=60, ge=15, le=1440)
+
+
+@app.get("/admin/section-records")
+def get_section_election_records(
+    branch: Optional[str] = None,
+    status: Optional[str] = None,
+    academic_year: Optional[str] = None,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Get all section election records with optional filtering.
+    Acts as a folder system for tracking all section elections.
+    """
+    from sqlalchemy import func
+    
+    query = db.query(models.SectionElectionRecord)
+    
+    if branch:
+        query = query.filter(models.SectionElectionRecord.branch == branch)
+    
+    if status:
+        query = query.filter(models.SectionElectionRecord.status == status)
+    
+    if academic_year:
+        query = query.filter(models.SectionElectionRecord.academic_year == academic_year)
+    
+    records = query.order_by(
+        models.SectionElectionRecord.created_at.desc()
+    ).all()
+    
+    return {
+        "records": [
+            {
+                "id": r.id,
+                "branch": r.branch,
+                "section": r.section,
+                "academic_year": r.academic_year,
+                "election_id": r.election_id,
+                "total_students": r.total_students,
+                "registered_candidates": r.registered_candidates,
+                "approved_candidates": r.approved_candidates,
+                "total_voters": r.total_voters,
+                "registration_opened": format_indian_time(r.registration_opened) if r.registration_opened else None,
+                "registration_closed": format_indian_time(r.registration_closed) if r.registration_closed else None,
+                "election_started": format_indian_time(r.election_started) if r.election_started else None,
+                "election_ended": format_indian_time(r.election_ended) if r.election_ended else None,
+                "winner_name": r.winner_name,
+                "winner_votes": r.winner_votes,
+                "runner_up_name": r.runner_up_name,
+                "runner_up_votes": r.runner_up_votes,
+                "nota_votes": r.nota_votes,
+                "turnout_percentage": r.turnout_percentage,
+                "is_reopened": r.is_reopened,
+                "reopen_count": r.reopen_count,
+                "reopen_reason": r.reopen_reason,
+                "last_reopen_at": format_indian_time(r.last_reopen_at) if r.last_reopen_at else None,
+                "status": r.status,
+                "notes": r.notes,
+                "created_at": format_indian_time(r.created_at),
+                "updated_at": format_indian_time(r.updated_at)
+            }
+            for r in records
+        ],
+        "total_count": len(records),
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.get("/admin/section-records/{record_id}")
+def get_section_election_record_detail(record_id: int, db: Session = Depends(database.get_db)):
+    """Get detailed information about a specific section election record."""
+    record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.id == record_id
+    ).first()
+    
+    if not record:
+        raise HTTPException(status_code=404, detail="Section election record not found")
+    
+    # Get candidate details if election exists
+    candidates_data = []
+    if record.election_id:
+        candidate_results = db.query(
+            models.Candidate.id,
+            models.Student.name.label('candidate_name'),
+            models.Student.usn.label('candidate_usn'),
+            models.Candidate.approved,
+            models.Candidate.created_at
+        ).join(
+            models.Student, models.Candidate.student_id == models.Student.id
+        ).filter(
+            models.Candidate.election_id == record.election_id
+        ).order_by(
+            models.Candidate.created_at
+        ).all()
+        
+        candidates_data = [
+            {
+                "id": c.id,
+                "name": c.candidate_name,
+                "usn": c.candidate_usn,
+                "approved": c.approved,
+                "registered_at": format_indian_time(c.created_at)
+            }
+            for c in candidate_results
+        ]
+    
+    return {
+        "record": {
+            "id": record.id,
+            "branch": record.branch,
+            "section": record.section,
+            "academic_year": record.academic_year,
+            "election_id": record.election_id,
+            "total_students": record.total_students,
+            "registered_candidates": record.registered_candidates,
+            "approved_candidates": record.approved_candidates,
+            "total_voters": record.total_voters,
+            "registration_opened": format_indian_time(record.registration_opened) if record.registration_opened else None,
+            "registration_closed": format_indian_time(record.registration_closed) if record.registration_closed else None,
+            "election_started": format_indian_time(record.election_started) if record.election_started else None,
+            "election_ended": format_indian_time(record.election_ended) if record.election_ended else None,
+            "winner_name": record.winner_name,
+            "winner_votes": record.winner_votes,
+            "runner_up_name": record.runner_up_name,
+            "runner_up_votes": record.runner_up_votes,
+            "nota_votes": record.nota_votes,
+            "turnout_percentage": record.turnout_percentage,
+            "is_reopened": record.is_reopened,
+            "reopen_count": record.reopen_count,
+            "reopen_reason": record.reopen_reason,
+            "last_reopen_at": format_indian_time(record.last_reopen_at) if record.last_reopen_at else None,
+            "status": record.status,
+            "notes": record.notes,
+            "created_at": format_indian_time(record.created_at),
+            "updated_at": format_indian_time(record.updated_at)
+        },
+        "candidates": candidates_data,
+        "timestamp": format_indian_time(get_current_indian_time())
+    }
+
+
+@app.post("/admin/section-records/{record_id}/reopen")
+def reopen_section_election(
+    record_id: int,
+    request: ReopenElectionRequest,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Reopen registration for a section election.
+    Used when something went wrong and admin needs to restart the process.
+    Preserves all existing data while allowing new registrations.
+    """
+    record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.id == record_id
+    ).first()
+    
+    if not record:
+        raise HTTPException(status_code=404, detail="Section election record not found")
+    
+    # Check if there's an existing election
+    if record.election_id:
+        election = db.query(models.Election).filter(
+            models.Election.id == record.election_id
+        ).first()
+        
+        if election:
+            # Stop the existing election if it's active
+            if election.is_active:
+                election.is_active = False
+                election.end_time = get_current_indian_time()
+                
+                # Log audit
+                log_audit(
+                    db, "STOP", "Election", election.id, None,
+                    new_values={"reason": "Reopening registration", "record_id": record_id}
+                )
+    
+    # Update record for reopening
+    record.is_reopened = True
+    record.reopen_count += 1
+    record.reopen_reason = request.reason
+    record.last_reopen_at = get_current_indian_time()
+    record.status = "registration_open"
+    record.election_ended = None
+    record.winner_name = None
+    record.winner_votes = 0
+    record.runner_up_name = None
+    record.runner_up_votes = 0
+    record.turnout_percentage = 0
+    
+    # Open new candidature window
+    now = get_current_indian_time()
+    end_time = now + timedelta(minutes=request.duration_minutes)
+    
+    # Check if window exists
+    window = db.query(models.CandidatureWindow).filter(
+        models.CandidatureWindow.branch == record.branch,
+        models.CandidatureWindow.section == record.section
+    ).first()
+    
+    if window:
+        # Update existing window
+        window.start_time = now
+        window.end_time = end_time
+        window.is_open = True
+        window.election_id = None  # Will be set when election starts
+    else:
+        # Create new window
+        window = models.CandidatureWindow(
+            branch=record.branch,
+            section=record.section,
+            start_time=now,
+            end_time=end_time,
+            is_open=True
+        )
+        db.add(window)
+    
+    record.registration_opened = now
+    record.registration_closed = None
+    
+    db.commit()
+    
+    # Broadcast WebSocket update
+    from main import manager
+    run_async_safely(
+        lambda: manager.broadcast_to_branch_section(
+            record.branch,
+            record.section,
+            {"type": "registration_reopened", "record_id": record.id}
+        ),
+        "broadcast_reopen"
+    )
+    
+    log_audit(
+        db, "REOPEN", "SectionElectionRecord", record_id, None,
+        new_values={
+            "reason": request.reason,
+            "duration_minutes": request.duration_minutes,
+            "reopen_count": record.reopen_count
+        }
+    )
+    
+    return {
+        "success": True,
+        "message": f"Registration reopened for {record.branch}-{record.section}. Window open for {request.duration_minutes} minutes.",
+        "record": {
+            "id": record.id,
+            "branch": record.branch,
+            "section": record.section,
+            "status": record.status,
+            "reopen_count": record.reopen_count,
+            "registration_opened": format_indian_time(record.registration_opened)
+        }
+    }
+
+
+@app.post("/admin/section-records/create-record")
+def create_or_update_section_record(
+    branch: str,
+    section: str,
+    academic_year: Optional[str] = None,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Create or update a section election record.
+    Called automatically when registration is opened for a section.
+    """
+    from datetime import datetime
+    
+    # Default to current academic year (April to March)
+    if not academic_year:
+        now = datetime.utcnow()
+        year_start = now.year - 1 if now.month < 4 else now.year
+        academic_year = f"{year_start}-{year_start + 1}"
+    
+    # Check if record exists
+    record = db.query(models.SectionElectionRecord).filter(
+        models.SectionElectionRecord.branch == branch,
+        models.SectionElectionRecord.section == section,
+        models.SectionElectionRecord.academic_year == academic_year
+    ).first()
+    
+    # Get student count for this section
+    total_students = db.query(models.Student).filter(
+        models.Student.branch == branch,
+        models.Student.section == section,
+        models.Student.is_admin == False
+    ).count()
+    
+    if record:
+        # Update existing record
+        record.total_students = total_students
+        record.updated_at = get_current_indian_time()
+    else:
+        # Create new record
+        record = models.SectionElectionRecord(
+            branch=branch,
+            section=section,
+            academic_year=academic_year,
+            total_students=total_students,
+            status="pending"
+        )
+        db.add(record)
+    
+    db.commit()
+    db.refresh(record)
+    
+    return {
+        "success": True,
+        "message": "Section election record created/updated",
+        "record": {
+            "id": record.id,
+            "branch": record.branch,
+            "section": record.section,
+            "academic_year": record.academic_year,
+            "total_students": record.total_students,
+            "status": record.status
+        }
     }
 
 

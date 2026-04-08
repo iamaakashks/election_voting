@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Independent Voter Verification Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        zinc: {
+                            850: '#1f1f22',
+                            900: '#18181b',
+                            950: '#09090b',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #52525b;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #71717a;
+        }
+    </style>
+</head>
+<body class="bg-zinc-50 dark:bg-[#09090B] text-zinc-900 dark:text-zinc-100 min-h-screen font-sans selection:bg-blue-500/30">
+    
+    <div class="max-w-4xl mx-auto px-4 py-12">
+        <div class="text-center mb-10">
+            <div class="w-16 h-16 bg-blue-100 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-inner">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m12 15 2 2 4-4"/><circle cx="12" cy="12" r="10"/><path d="m8 12 2 2 4-4"/>
+                </svg>
+            </div>
+            <h1 class="text-3xl font-black tracking-tight text-zinc-900 dark:text-white mb-3">Independent Verification</h1>
+            <p class="text-zinc-500 dark:text-zinc-400 max-w-xl mx-auto">
+                Cryptographically prove that your vote was counted in the final election results without relying on the server's word.
+            </p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+            <!-- Left Column: Input Form -->
+            <div class="md:col-span-5">
+                <div class="bg-white dark:bg-[#121214] p-6 rounded-2xl border border-zinc-200 dark:border-white/10 shadow-xl">
+                    <h2 class="text-lg font-bold mb-4">Start Verification</h2>
+                    
+                    <form id="verifyForm" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2">API Server URL</label>
+                            <input type="url" id="apiUrl" value="http://localhost:8000" class="w-full bg-zinc-50 dark:bg-black/50 border border-zinc-300 dark:border-white/10 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all" required>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2">Vote Receipt Code</label>
+                            <input type="text" id="receiptCode" placeholder="VOTE-XXXX-XXXX" class="w-full bg-zinc-50 dark:bg-black/50 border border-zinc-300 dark:border-white/10 rounded-xl px-4 py-3 text-sm font-bold font-mono uppercase tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all" required>
+                        </div>
+
+                        <button type="submit" id="verifyBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-blue-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mt-2">
+                            <span>Verify My Vote</span>
+                            <svg id="btnSpinner" class="w-4 h-4 animate-spin hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        </button>
+                    </form>
+
+                    <div class="mt-6 p-4 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 rounded-xl text-xs text-emerald-800 dark:text-emerald-300 space-y-2">
+                        <strong class="block uppercase tracking-wider font-black mb-1">How it works:</strong>
+                        <ol class="list-decimal pl-4 space-y-1 opacity-90">
+                            <li>Fetches your anonymous Vote Hash from the server using your Receipt Code.</li>
+                            <li>Downloads the public ledger of all votes.</li>
+                            <li>Mathematically recalculates the Merkle Tree Root entirely in your browser.</li>
+                            <li>Verifies that your Vote Hash is included in the verified tree.</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Live Logs -->
+            <div class="md:col-span-7 flex flex-col h-full">
+                <div class="bg-black rounded-2xl border border-zinc-800 shadow-xl overflow-hidden flex-1 min-h-[400px] flex flex-col relative">
+                    <div class="px-4 py-3 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between z-10">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-4 h-4 text-zinc-500" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                            <span class="text-xs font-bold text-zinc-400 font-mono tracking-widest">VERIFICATION LOGS</span>
+                        </div>
+                        <div class="flex gap-1.5">
+                            <div class="w-3 h-3 rounded-full bg-red-500/20 border border-red-500/50"></div>
+                            <div class="w-3 h-3 rounded-full bg-amber-500/20 border border-amber-500/50"></div>
+                            <div class="w-3 h-3 rounded-full bg-emerald-500/20 border border-emerald-500/50"></div>
+                        </div>
+                    </div>
+                    
+                    <div id="logs" class="p-4 font-mono text-[13px] leading-relaxed text-zinc-300 overflow-y-auto flex-1 custom-scrollbar space-y-1.5 pb-8 relative z-0">
+                        <div class="text-zinc-600">Waiting for input...</div>
+                    </div>
+
+                    <!-- Final Verification Stamp (Hidden initially) -->
+                    <div id="verifiedStamp" class="hidden absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 rotate-[-15deg] pointer-events-none z-20">
+                        <div class="border-4 border-emerald-500 text-emerald-500 px-6 py-2 rounded-xl text-4xl font-black uppercase tracking-widest opacity-80 shadow-[0_0_20px_rgba(16,185,129,0.3)]" style="text-shadow: 0 0 10px rgba(16,185,129,0.5);">
+                            VERIFIED
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Set dark mode automatically based on system preference
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+        }
+
+        const logsDiv = document.getElementById('logs');
+        
+        function appendLog(message, type = 'info') {
+            const el = document.createElement('div');
+            el.className = 'break-all';
+            
+            const timestamp = new Date().toISOString().split('T')[1].substring(0, 12);
+            
+            let colorClass = 'text-blue-400';
+            if (type === 'success') colorClass = 'text-emerald-400 font-bold';
+            if (type === 'error') colorClass = 'text-red-400 font-bold';
+            if (type === 'warning') colorClass = 'text-amber-400';
+            if (type === 'system') colorClass = 'text-zinc-500';
+            if (type === 'hash') colorClass = 'text-purple-400';
+
+            el.innerHTML = `<span class="text-zinc-600 select-none">[${timestamp}]</span> <span class="${colorClass}">${message}</span>`;
+            logsDiv.appendChild(el);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        // SHA-256 implementation
+        async function sha256(message) {
+            const msgBuffer = new TextEncoder().encode(message);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Build Merkle Tree locally
+        async function buildMerkleTree(hashes) {
+            if (!hashes || hashes.length === 0) {
+                return await sha256("EMPTY");
+            }
+            
+            let currentLevel = [...hashes];
+            // Pad to power of 2 (same as backend)
+            while ((currentLevel.length & (currentLevel.length - 1)) !== 0) {
+                currentLevel.push(currentLevel[currentLevel.length - 1]);
+            }
+            
+            let levelCounter = 0;
+            while (currentLevel.length > 1) {
+                appendLog(`Computing Merkle Tree Level ${levelCounter}... (${currentLevel.length} nodes)`, 'system');
+                const nextLevel = [];
+                for (let i = 0; i < currentLevel.length; i += 2) {
+                    const combined = currentLevel[i] + currentLevel[i + 1];
+                    nextLevel.push(await sha256(combined));
+                }
+                currentLevel = nextLevel;
+                levelCounter++;
+            }
+            
+            return currentLevel[0];
+        }
+
+        document.getElementById('verifyForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const apiUrl = document.getElementById('apiUrl').value.replace(/\/$/, '');
+            const receiptCode = document.getElementById('receiptCode').value.trim().toUpperCase();
+            const btn = document.getElementById('verifyBtn');
+            const spinner = document.getElementById('btnSpinner');
+            const verifiedStamp = document.getElementById('verifiedStamp');
+            
+            logsDiv.innerHTML = '';
+            verifiedStamp.classList.add('hidden');
+            appendLog(`Starting independent verification process...`, 'system');
+            
+            btn.disabled = true;
+            spinner.classList.remove('hidden');
+
+            try {
+                // Step 1: Get Vote Hash & Election ID using Receipt Code
+                appendLog(`Connecting to ${apiUrl}...`, 'info');
+                appendLog(`Sending Receipt Code: ${receiptCode}`, 'info');
+                
+                const verifyRes = await fetch(`${apiUrl}/public/verify-receipt`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ receipt_code: receiptCode })
+                });
+
+                if (!verifyRes.ok) {
+                    const error = await verifyRes.json();
+                    throw new Error(error.detail || "Invalid receipt code");
+                }
+
+                const verifyData = await verifyRes.json();
+                const voteHash = verifyData.vote_hash;
+                const electionId = verifyData.election.id;
+                
+                appendLog(`âœ“ Receipt Validated!`, 'success');
+                appendLog(`Your Vote Hash: <span class="text-purple-400 select-all">${voteHash}</span>`, 'hash');
+                appendLog(`Election ID: ${electionId} (${verifyData.election.branch}-${verifyData.election.section})`, 'info');
+                
+                // Step 2: Download Public Ledger
+                appendLog(`Downloading Public Ledger for Election ${electionId}...`, 'info');
+                const ledgerRes = await fetch(`${apiUrl}/public/ledger/${electionId}`);
+                
+                if (!ledgerRes.ok) {
+                    throw new Error("Failed to download public ledger");
+                }
+                
+                const ledgerData = await ledgerRes.json();
+                const votes = ledgerData.ledger;
+                const serverMerkleRoot = ledgerData.merkle_root;
+                
+                appendLog(`âœ“ Downloaded ${votes.length} votes from ledger.`, 'success');
+                appendLog(`Server Claimed Merkle Root: <span class="text-purple-400 select-all">${serverMerkleRoot}</span>`, 'hash');
+
+                // Step 3: Verify your vote is in the ledger
+                const foundVote = votes.find(v => v.vote_hash === voteHash);
+                if (foundVote) {
+                    appendLog(`âœ“ SUCCESS: Your vote hash was found in the public ledger at index #${foundVote.vote_index}!`, 'success');
+                } else {
+                    throw new Error("CRITICAL FAILURE: Your vote hash is MISSING from the public ledger!");
+                }
+
+                // Step 4: Mathematically rebuild Merkle Tree
+                appendLog(`Re-calculating Merkle Root mathematically in your browser...`, 'warning');
+                const voteHashes = votes.map(v => v.vote_hash);
+                
+                const localMerkleRoot = await buildMerkleTree(voteHashes);
+                
+                appendLog(`Locally Computed Root: <span class="text-purple-400 select-all">${localMerkleRoot}</span>`, 'hash');
+
+                // Step 5: Final Comparison
+                if (localMerkleRoot === serverMerkleRoot) {
+                    appendLog(`âœ“ MERKLE ROOT MATCHES EXACTLY!`, 'success');
+                    appendLog(`CRYPTOGRAPHIC PROOF SUCCESSFUL!`, 'success');
+                    appendLog(`It is mathematically impossible for your vote to have been altered or removed without changing the root hash.`, 'info');
+                    
+                    verifiedStamp.classList.remove('hidden');
+                } else {
+                    appendLog(`âœ— MERKLE ROOT MISMATCH!`, 'error');
+                    appendLog(`The ledger provided by the server has been tampered with!`, 'error');
+                }
+
+            } catch (err) {
+                appendLog(`âœ— ERROR: ${err.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                spinner.classList.add('hidden');
+                appendLog(`Verification process ended.`, 'system');
+            }
+        });
+    </script>
+</body>
+</html>

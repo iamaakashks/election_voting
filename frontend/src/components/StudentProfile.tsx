@@ -16,6 +16,7 @@ import ChangePasswordModal from './ChangePasswordModal';
 import AlertModal, { Modal } from './AlertModal';
 import Tooltip from './Tooltip';
 import useWebSocket, { type WebSocketMessage } from '../hooks/useWebSocket';
+import { generateBlindedToken, unblindSignature } from '../services/rsaBlind';
 
 interface Student {
   usn: string;
@@ -48,7 +49,7 @@ interface StudentProfileProps {
   onActiveTabChange?: (tab: StudentViewTab) => void;
 }
 
-type StudentViewTab = 'portal' | 'history' | 'live-ledger';
+type StudentViewTab = 'vote' | 'history' | 'live-ledger';
 
 interface HistoryElection {
   id: number;
@@ -117,7 +118,7 @@ const isTransportError = (error: unknown): boolean => {
   return false;
 };
 
-const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, activeTab = 'portal', onActiveTabChange }) => {
+const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, activeTab = 'vote', onActiveTabChange }) => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [election, setElection] = useState<Election | null>(null);
   const [voted, setVoted] = useState(student.has_voted);
@@ -621,7 +622,21 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, acti
       onConfirm: async () => {
         setLoading(true);
         try {
-          const voteResponse = await electionsAPI.castVote(election.id, selectedCandidateId || undefined, student.usn, isNota);
+          // 1. Get Server's RSA Public Key
+          const pubKey = await electionsAPI.getRSAPublicKey();
+          
+          // 2. Generate and Blind Token locally
+          const blindedData = generateBlindedToken(pubKey);
+          
+          // 3. Request Authorization (Server verifies identity, then signs blinded token)
+          const authRes = await electionsAPI.requestVotingToken(election.id, blindedData.blindedToken, student.usn);
+          
+          // 4. Unblind Signature mathematically
+          const unblindedSignature = unblindSignature(authRes.signature, blindedData.blindingFactor, pubKey);
+          
+          // 5. Cast Anonymous Vote using the unblinded token and signature
+          const voteResponse = await electionsAPI.castVote(election.id, selectedCandidateId || undefined, blindedData.token, unblindedSignature, isNota);
+          
           const receiptCode = voteResponse.receipt_code;
           setVoteReceiptCode(receiptCode);
           setVerifyReceiptInput(receiptCode);
@@ -683,7 +698,7 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, acti
     ? `${lastVerificationResult.vote_hash.slice(0, 18)}...${lastVerificationResult.vote_hash.slice(-10)}`
     : null;
 
-  if (voted && activeTab === 'portal') {
+  if (voted && activeTab === 'vote') {
     return (
       <div className="space-y-6 max-w-3xl mx-auto">
         <div className="bg-white dark:bg-[#121214] p-12 rounded-xl shadow-md text-center border border-emerald-200 dark:border-emerald-500/20">
@@ -1137,7 +1152,7 @@ const StudentProfile: React.FC<StudentProfileProps> = ({ student, onLogout, acti
         )}
       </div>
 
-      {activeTab === 'portal' && (
+      {activeTab === 'vote' && (
       <>
       {/* Election / Voting Section */}
       {!election ? (

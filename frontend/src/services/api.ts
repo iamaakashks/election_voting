@@ -154,12 +154,27 @@ export const electionsAPI = {
     return response.data;
   },
 
-  castVote: async (election_id: number, candidate_id: number | undefined, student_usn: string, is_nota: boolean = false): Promise<VoteCastResponse> => {
+  getRSAPublicKey: async () => {
+    const response = await api.get('/public/rsa-key');
+    return response.data;
+  },
+
+  requestVotingToken: async (election_id: number, blinded_token: string, student_usn: string) => {
+    const response = await api.post('/vote/request-token', {
+      election_id,
+      blinded_token,
+      student_usn
+    });
+    return response.data;
+  },
+
+  castVote: async (election_id: number, candidate_id: number | undefined, token: string, signature: string, is_nota: boolean = false): Promise<VoteCastResponse> => {
     const response = await api.post('/vote', {
       election_id,
       candidate_id,
       is_nota,
-      student_usn  // Send in body
+      token,
+      signature
     });
     return response.data;
   },
@@ -346,6 +361,92 @@ export const adminAPI = {
   // Live Ledger & Transparency
   getLiveLedger: async (election_id: number): Promise<LiveLedgerResponse> => {
     const response = await api.get(`/admin/live-ledger/${election_id}`);
+    return response.data;
+  },
+
+  // Dashboard & Statistics
+  getDashboardStats: async () => {
+    const response = await api.get('/admin/dashboard/stats');
+    return response.data;
+  },
+
+  getDashboardElections: async () => {
+    const response = await api.get('/admin/dashboard/elections');
+    return response.data;
+  },
+
+  getRecentActivity: async (limit: number = 20) => {
+    const response = await api.get(`/admin/dashboard/activity-feed?limit=${limit}`);
+    return response.data;
+  },
+
+  getTurnoutBySection: async () => {
+    const response = await api.get('/admin/dashboard/turnout-by-section');
+    return response.data;
+  },
+
+  getVoteTimeline: async (election_id: number, interval: 'minute' | 'hour' | 'day' = 'hour') => {
+    const response = await api.get(`/admin/dashboard/vote-timeline/${election_id}?interval=${interval}`);
+    return response.data;
+  },
+
+  getCandidateComparison: async (election_id: number) => {
+    const response = await api.get(`/admin/dashboard/candidate-comparison/${election_id}`);
+    return response.data;
+  },
+
+  getHistoricalData: async (limit: number = 20, status?: string, branch?: string) => {
+    const params: Record<string, string | number> = { limit };
+    if (status) params.status = status;
+    if (branch) params.branch = branch;
+    const response = await api.get('/admin/dashboard/historical-data', { params });
+    return response.data;
+  },
+
+  getPredictiveAnalytics: async (election_id: number) => {
+    const response = await api.get(`/admin/dashboard/predictive-analytics/${election_id}`);
+    return response.data;
+  },
+
+  exportElectionData: async (election_id: number, format: 'csv' | 'json' = 'csv') => {
+    const response = await api.post(`/admin/dashboard/export/${election_id}?format=${format}`);
+    return response.data;
+  },
+
+  downloadElectionCSV: async (election_id: number) => {
+    const response = await api.get(`/admin/dashboard/export/${election_id}?format=csv`, {
+      responseType: 'blob'
+    });
+    return response.data;
+  },
+
+  // Section Election Records
+  getSectionRecords: async (branch?: string, status?: string, academic_year?: string) => {
+    const params: Record<string, string> = {};
+    if (branch) params.branch = branch;
+    if (status) params.status = status;
+    if (academic_year) params.academic_year = academic_year;
+    const response = await api.get('/admin/section-records', { params });
+    return response.data;
+  },
+
+  getSectionRecordDetail: async (record_id: number) => {
+    const response = await api.get(`/admin/section-records/${record_id}`);
+    return response.data;
+  },
+
+  reopenSectionElection: async (record_id: number, reason: string, duration_minutes: number = 60) => {
+    const response = await api.post(`/admin/section-records/${record_id}/reopen`, {
+      reason,
+      duration_minutes
+    });
+    return response.data;
+  },
+
+  createSectionRecord: async (branch: string, section: string, academic_year?: string) => {
+    const params: Record<string, string> = { branch, section };
+    if (academic_year) params.academic_year = academic_year;
+    const response = await api.post('/admin/section-records/create-record', null, { params });
     return response.data;
   },
 

@@ -27,13 +27,18 @@ import {
   BookOpen,
   Vote,
   Link2,
-  ThumbsDown
+  ThumbsDown,
+  Settings,
+  AlertTriangle,
+  Trash2
 } from 'lucide-react';
 import ChangePasswordModal from './ChangePasswordModal';
 import ElectionAnalytics from './ElectionAnalytics';
 import AlertModal, { Modal } from './AlertModal';
 import Tooltip from './Tooltip';
 import useWebSocket, { type WebSocketMessage } from '../hooks/useWebSocket';
+import DashboardPanel from './DashboardPanel';
+import SectionRecords from './SectionRecords';
 
 interface Election {
   id: number;
@@ -81,7 +86,7 @@ interface GlobalRegistrationWindow {
   time_remaining: number;
 }
 
-type AdminTab = 'global' | 'election' | 'candidates' | 'students' | 'all-candidates' | 'live-ledger';
+type AdminTab = 'dashboard' | 'section-records' | 'global' | 'election' | 'candidates' | 'students' | 'all-candidates' | 'live-ledger' | 'settings';
 
 interface AdminProps {
   activeTab?: AdminTab;
@@ -247,7 +252,7 @@ const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveT
   const [durationPreset, setDurationPreset] = useState('60');
   const [electionDuration, setElectionDuration] = useState(15);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<AdminTab>(controlledActiveTab ?? 'global');
+  const [activeTab, setActiveTab] = useState<AdminTab>(controlledActiveTab ?? 'dashboard');
   const [elections, setElections] = useState<Election[]>([]);
   const [pendingCandidates, setPendingCandidates] = useState<Candidate[]>([]);
   const [windowCandidates, setWindowCandidates] = useState<Candidate[]>([]);
@@ -936,102 +941,6 @@ const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveT
 
   return (
     <div className="w-full space-y-8 pb-12">
-      {/* Header Section */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-900 dark:text-white tracking-tight leading-tight">Admin Panel</h1>
-          <p className="text-sm sm:text-base font-medium text-zinc-500 dark:text-zinc-400 mt-2">Manage elections, registrations, and candidate approvals.</p>
-        </div>
-        <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
-          <div className="flex items-center bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none p-1.5 backdrop-blur-xl">
-            <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 text-[11px] sm:text-[13px] font-bold text-zinc-700 dark:text-zinc-200 border-r border-zinc-200 dark:border-white/10">
-              <Activity className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-500" /> {elections.length} Active
-            </div>
-            <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 text-[11px] sm:text-[13px] font-bold text-zinc-700 dark:text-zinc-200">
-              <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-500" /> {pendingCandidates.length} Pending
-            </div>
-          </div>
-          <Tooltip content="Refresh Data">
-            <button
-              onClick={() => { fetchElections(); fetchGlobalRegistrationStatus(); fetchSectionOverrides(); }}
-              className="p-2 sm:p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-zinc-50 dark:hover:bg-white/5 hover:text-zinc-900 dark:hover:text-white transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-          </Tooltip>
-          <Tooltip content="Change Password">
-            <button
-              onClick={() => setShowChangePassword(true)}
-              className="p-2 sm:p-3 bg-white dark:bg-[#121214] border border-zinc-200/80 dark:border-white/10 text-zinc-600 dark:text-zinc-300 rounded-xl shadow-lg shadow-zinc-200/20 dark:shadow-none hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <KeyRound className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-          </Tooltip>
-          <Tooltip content="Reset All Data (Testing Only)">
-            <button
-              onClick={handleSystemReset}
-              disabled={resetting}
-              className="p-2 sm:p-3 bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg shadow-red-500/20 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
-            >
-              {resetting ? <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <XCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
-            </button>
-          </Tooltip>
-        </div>
-      </div>
-
-      {/* Mobile Tab Selector */}
-      <div className="lg:hidden mt-4">
-        <div className="relative">
-          <select
-            value={activeTab}
-            onChange={(e) => setActiveTab(e.target.value as any)}
-            className="w-full appearance-none bg-white dark:bg-[#121214] border border-zinc-300 dark:border-white/10 text-zinc-900 dark:text-zinc-100 text-[15px] font-semibold rounded-xl px-4 py-3 pr-10 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 dark:focus:ring-blue-500/40 transition-all cursor-pointer hover:border-zinc-400 dark:hover:border-white/20"
-          >
-            <option value="global">Candidate Registration</option>
-            <option value="all-candidates">All Candidates</option>
-            <option value="election">Voting Instances</option>
-            <option value="candidates">Approvals</option>
-            <option value="students">Students Directory</option>
-            <option value="live-ledger">Live Ledger</option>
-          </select>
-          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-zinc-500 dark:text-zinc-400">
-            <ChevronDown className="h-5 w-5" />
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs - Hidden on mobile, shown on lg screens */}
-      <div className="hidden lg:flex space-x-2 border-b border-zinc-200 dark:border-white/10 overflow-x-auto custom-scrollbar pb-px">
-        {[
-          { id: 'global', label: 'Candidate Registration', icon: DoorOpen },
-          { id: 'all-candidates', label: 'All Candidates', icon: Users },
-          { id: 'election', label: 'Voting Instances', icon: CalendarDays },
-          { id: 'candidates', label: 'Approvals', icon: ShieldCheck, badge: pendingCandidates.length },
-          { id: 'students', label: 'Students Directory', icon: GraduationCap },
-          { id: 'live-ledger', label: 'Live Ledger', icon: BookOpen }
-        ].map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`flex items-center gap-2.5 px-5 py-3.5 text-[15px] font-bold border-b-2 transition-all duration-300 whitespace-nowrap ${
-              activeTab === tab.id
-                ? 'border-blue-600 text-blue-600 dark:border-blue-500 dark:text-blue-400'
-                : 'border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:border-zinc-300 dark:hover:border-white/30'
-            }`}
-          >
-            <tab.icon className="w-5 h-5" />
-            {tab.label}
-            {!!tab.badge && tab.badge > 0 && (
-              <span className={`ml-1.5 inline-flex items-center justify-center text-[11px] font-black px-2 py-0.5 rounded-md ${
-                activeTab === tab.id ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300' : 'bg-zinc-100 dark:bg-white/10 text-zinc-700 dark:text-zinc-300'
-              }`}>
-                {tab.badge}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
       {/* Content Area */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
 
@@ -1183,9 +1092,16 @@ const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveT
                     min={5}
                     helpText="Standard voting window is 15 minutes."
                   />
+                  {elections.some(e => e.status === 'active' || e.is_active) && (
+                    <div className="p-4 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20 rounded-xl">
+                      <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">
+                        ⚠️ An election is currently active. Please stop the current election before starting a new one.
+                      </p>
+                    </div>
+                  )}
                   <button
                     type="submit"
-                    disabled={loading}
+                    disabled={loading || elections.some(e => e.status === 'active' || e.is_active)}
                     className="w-full inline-flex justify-center items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3.5 rounded-xl text-[15px] font-bold shadow-lg shadow-blue-500/20 transition-all duration-200 focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-[#09090B] focus:ring-blue-500 disabled:opacity-50 mt-4"
                   >
                     {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
@@ -1198,8 +1114,22 @@ const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveT
         )}
 
         {/* Right Column / Full Width: Data Tables */}
-        <div className={(activeTab === 'candidates' || activeTab === 'students' || activeTab === 'all-candidates') ? 'lg:col-span-12' : 'lg:col-span-8'}>
+        <div className={(activeTab === 'global' || activeTab === 'election') ? 'lg:col-span-8' : 'lg:col-span-12'}>
           <div className="bg-white dark:bg-[#121214] rounded-2xl border border-zinc-200/80 dark:border-white/10 shadow-xl shadow-zinc-200/40 dark:shadow-none overflow-hidden flex flex-col">
+
+            {/* Dashboard Tab */}
+            {activeTab === 'dashboard' && (
+              <div className="p-0">
+                <DashboardPanel />
+              </div>
+            )}
+
+            {/* Section Records Tab */}
+            {activeTab === 'section-records' && (
+              <div className="p-0">
+                <SectionRecords />
+              </div>
+            )}
 
             {activeTab === 'all-candidates' && (
               <>
@@ -1955,6 +1885,77 @@ const Admin: React.FC<AdminProps> = ({ activeTab: controlledActiveTab, onActiveT
           </div>
         </div>
       </div>
+
+      {/* Settings Tab */}
+      {activeTab === 'settings' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-12">
+            <div className="bg-white dark:bg-[#121214] rounded-2xl border border-zinc-200/80 dark:border-white/10 shadow-xl shadow-zinc-200/40 dark:shadow-none overflow-hidden">
+              <div className="px-6 py-5 border-b border-zinc-200 dark:border-white/10 bg-zinc-50/50 dark:bg-transparent">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-purple-50 dark:bg-purple-500/10 border border-purple-200 dark:border-purple-500/20 flex items-center justify-center">
+                    <Settings className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold uppercase tracking-widest text-zinc-800 dark:text-zinc-200">System Settings</h3>
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mt-0.5">Manage system configuration and data.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-6">
+                {/* Danger Zone */}
+                <div className="bg-red-50 dark:bg-red-500/5 border border-red-200 dark:border-red-500/20 rounded-xl p-6">
+                  <div className="flex items-start gap-3 mb-4">
+                    <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="text-base font-bold text-red-900 dark:text-red-300">Danger Zone</h4>
+                      <p className="text-sm text-red-700 dark:text-red-400/80 mt-1">
+                        Irreversible actions that will permanently delete election data. Use with extreme caution.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-[#09090B] border border-red-200 dark:border-red-500/20 rounded-xl p-5">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <h5 className="text-sm font-bold text-zinc-900 dark:text-white">Reset All Election Data</h5>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                          Delete all votes, candidates, elections, and registration windows. Student accounts will remain but their vote status will be reset.
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleSystemReset}
+                        disabled={resetting}
+                        className="inline-flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-lg text-sm font-bold shadow-lg shadow-red-500/20 transition-all duration-200 focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-[#09090B] focus:ring-red-500 disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {resetting ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            Resetting...
+                          </>
+                        ) : (
+                          <>
+                            <Trash2 className="w-4 h-4" />
+                            Reset All Data
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-start gap-2 text-xs text-red-600 dark:text-red-400">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <p className="font-medium">
+                      This action cannot be undone. All election results, vote records, and candidate data will be permanently deleted.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Change Password Modal */}
       {showChangePassword && (

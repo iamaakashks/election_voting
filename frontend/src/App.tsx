@@ -4,12 +4,12 @@ import Admin from './components/Admin';
 import Login from './components/Login';
 import StudentProfile from './components/StudentProfile';
 import { ThemeProvider, useTheme } from './components/ThemeProvider';
-import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, DoorOpen, Users, CalendarDays, Shield as ShieldIcon, GraduationCap, BookOpen, History, Vote as VoteIcon } from 'lucide-react';
+import { ShieldCheck, Moon, Sun, Monitor, Menu, X, ChevronRight, LayoutGrid, LogOut, PanelLeftClose, PanelLeftOpen, DoorOpen, Users, CalendarDays, Shield as ShieldIcon, GraduationCap, BookOpen, History, Vote as VoteIcon, BarChart3, Archive, Settings } from 'lucide-react';
 import Tooltip from './components/Tooltip';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-const ADMIN_TABS = ['global', 'election', 'candidates', 'students', 'all-candidates', 'live-ledger'] as const;
-const STUDENT_TABS = ['portal', 'history', 'live-ledger'] as const;
+const ADMIN_TABS = ['dashboard', 'section-records', 'election', 'global', 'candidates', 'all-candidates', 'students', 'live-ledger', 'settings'] as const;
+const STUDENT_TABS = ['vote', 'history', 'live-ledger'] as const;
 type AdminTab = (typeof ADMIN_TABS)[number];
 type StudentTab = (typeof STUDENT_TABS)[number];
 const ADMIN_TAB_STORAGE_KEY = 'nie_admin_active_tab';
@@ -126,9 +126,9 @@ const NavigationLinks = ({
       <h3 className={`px-4 text-[11px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest mb-3 ${collapsed ? 'lg:hidden' : ''}`}>Navigation</h3>
       {userType === 'student' && onNavigateToStudentTab && (
         <>
-          <button onClick={() => handleStudentNav('portal')} className={linkClass(activeStudentTab === 'portal')}>
+          <button onClick={() => handleStudentNav('vote')} className={linkClass(activeStudentTab === 'vote')}>
             <VoteIcon className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Voter Portal</span>
+            <span className={collapsed ? 'lg:hidden' : ''}>Active Election</span>
           </button>
           <button onClick={() => handleStudentNav('history')} className={linkClass(activeStudentTab === 'history')}>
             <History className="w-4 h-4" />
@@ -142,29 +142,52 @@ const NavigationLinks = ({
       )}
       {userType === 'admin' && onNavigateToAdminTab && (
         <>
+          {/* Monitoring Section */}
+          <h3 className={`px-4 pt-4 pb-2 text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest ${collapsed ? 'lg:hidden' : ''}`}>Monitoring</h3>
+          <button onClick={() => handleAdminNav('dashboard')} className={linkClass(activeAdminTab === 'dashboard')}>
+            <BarChart3 className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Dashboard</span>
+          </button>
+          <button onClick={() => handleAdminNav('section-records')} className={linkClass(activeAdminTab === 'section-records')}>
+            <Archive className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Election Records</span>
+          </button>
+
+          {/* Election Management Section */}
+          <h3 className={`px-4 pt-4 pb-2 text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest ${collapsed ? 'lg:hidden' : ''}`}>Election Management</h3>
+          <button onClick={() => handleAdminNav('election')} className={linkClass(activeAdminTab === 'election')}>
+            <CalendarDays className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Voting Instances</span>
+          </button>
           <button onClick={() => handleAdminNav('global')} className={linkClass(activeAdminTab === 'global')}>
             <DoorOpen className="w-4 h-4" />
             <span className={collapsed ? 'lg:hidden' : ''}>Candidate Registration</span>
+          </button>
+
+          {/* People Section */}
+          <h3 className={`px-4 pt-4 pb-2 text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest ${collapsed ? 'lg:hidden' : ''}`}>People</h3>
+          <button onClick={() => handleAdminNav('candidates')} className={linkClass(activeAdminTab === 'candidates')}>
+            <ShieldIcon className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Approvals</span>
           </button>
           <button onClick={() => handleAdminNav('all-candidates')} className={linkClass(activeAdminTab === 'all-candidates')}>
             <Users className="w-4 h-4" />
             <span className={collapsed ? 'lg:hidden' : ''}>All Candidates</span>
           </button>
-          <button onClick={() => handleAdminNav('election')} className={linkClass(activeAdminTab === 'election')}>
-            <CalendarDays className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Voting Instances</span>
-          </button>
-          <button onClick={() => handleAdminNav('candidates')} className={linkClass(activeAdminTab === 'candidates')}>
-            <ShieldIcon className="w-4 h-4" />
-            <span className={collapsed ? 'lg:hidden' : ''}>Approvals</span>
-          </button>
           <button onClick={() => handleAdminNav('students')} className={linkClass(activeAdminTab === 'students')}>
             <GraduationCap className="w-4 h-4" />
             <span className={collapsed ? 'lg:hidden' : ''}>Students Directory</span>
           </button>
+
+          {/* System Section */}
+          <h3 className={`px-4 pt-4 pb-2 text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest ${collapsed ? 'lg:hidden' : ''}`}>System</h3>
           <button onClick={() => handleAdminNav('live-ledger')} className={linkClass(activeAdminTab === 'live-ledger')}>
             <BookOpen className="w-4 h-4" />
             <span className={collapsed ? 'lg:hidden' : ''}>Live Ledger</span>
+          </button>
+          <button onClick={() => handleAdminNav('settings')} className={linkClass(activeAdminTab === 'settings')}>
+            <Settings className="w-4 h-4" />
+            <span className={collapsed ? 'lg:hidden' : ''}>Settings</span>
           </button>
         </>
       )}
@@ -332,8 +355,8 @@ function App() {
   const [userType, setUserType] = useState<'student' | 'admin' | null>(null);
   const [studentUser, setStudentUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [adminActiveTab, setAdminActiveTab] = useState<AdminTab>(() => getStoredTab(ADMIN_TAB_STORAGE_KEY, ADMIN_TABS, 'global'));
-  const [studentActiveTab, setStudentActiveTab] = useState<StudentTab>(() => getStoredTab(STUDENT_TAB_STORAGE_KEY, STUDENT_TABS, 'portal'));
+  const [adminActiveTab, setAdminActiveTab] = useState<AdminTab>(() => getStoredTab(ADMIN_TAB_STORAGE_KEY, ADMIN_TABS, 'dashboard'));
+  const [studentActiveTab, setStudentActiveTab] = useState<StudentTab>(() => getStoredTab(STUDENT_TAB_STORAGE_KEY, STUDENT_TABS, 'vote'));
 
   // Check for existing session on mount
   useEffect(() => {
@@ -365,8 +388,8 @@ function App() {
     localStorage.removeItem('user_type');
     setUserType(null);
     setStudentUser(null);
-    setAdminActiveTab('global');
-    setStudentActiveTab('portal');
+    setAdminActiveTab('dashboard');
+    setStudentActiveTab('vote');
   };
 
   useEffect(() => {

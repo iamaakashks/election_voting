@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Boolean, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Boolean, Text, UniqueConstraint, Float
 from sqlalchemy.orm import relationship
 from database import Base
 import datetime
@@ -75,6 +75,9 @@ class Vote(Base):
     # Hash Chain for tamper-evidence
     previous_hash = Column(String(64), nullable=True)  # Hash of previous vote (None for first vote)
     vote_hash = Column(String(64), nullable=True, index=True)  # Hash of this vote data
+    
+    # Prevent double voting with blind signatures
+    voting_token_hash = Column(String(64), unique=True, nullable=True, index=True)
     
     # Relationships
     election = relationship("Election", back_populates="votes")
@@ -206,6 +209,60 @@ class VoteReceiptCode(Base):
     
     # Relationship
     vote = relationship("Vote", backref="receipt_code")
+
+
+class SectionElectionRecord(Base):
+    """
+    Tracks complete election records for each section.
+    Acts as a folder storing metadata and results for each section's election.
+    Allows admin to reopen registration if something went wrong.
+    """
+    __tablename__ = "section_election_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    branch = Column(String(10), nullable=False, index=True)
+    section = Column(String(5), nullable=False, index=True)
+    academic_year = Column(String(20), nullable=False)  # e.g., "2024-2025"
+    
+    # Election reference
+    election_id = Column(Integer, ForeignKey("elections.id"), nullable=True, index=True)
+    
+    # Student counts
+    total_students = Column(Integer, default=0)  # Total eligible students in section
+    registered_candidates = Column(Integer, default=0)  # Students who registered as candidates
+    approved_candidates = Column(Integer, default=0)  # Candidates approved by admin
+    total_voters = Column(Integer, default=0)  # Students who actually voted
+    
+    # Election status
+    registration_opened = Column(DateTime, nullable=True)  # When registration was opened
+    registration_closed = Column(DateTime, nullable=True)  # When registration was closed
+    election_started = Column(DateTime, nullable=True)  # When voting started
+    election_ended = Column(DateTime, nullable=True)  # When voting ended
+    
+    # Results
+    winner_name = Column(String(100), nullable=True)
+    winner_votes = Column(Integer, default=0)
+    runner_up_name = Column(String(100), nullable=True)
+    runner_up_votes = Column(Integer, default=0)
+    nota_votes = Column(Integer, default=0)
+    turnout_percentage = Column(Float, default=0)
+    
+    # Reopen tracking
+    is_reopened = Column(Boolean, default=False)  # Was this election reopened?
+    reopen_count = Column(Integer, default=0)  # How many times reopened
+    reopen_reason = Column(Text, nullable=True)  # Reason for reopening
+    last_reopen_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    status = Column(String(50), default="pending")  # pending, registration_open, election_active, completed, reopened
+    notes = Column(Text, nullable=True)  # Admin notes
+    
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('branch', 'section', 'academic_year', name='unique_section_record_per_year'),
+    )
 
 
 class MerkleTree(Base):

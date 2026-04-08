@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, User, Lock, LogIn, AlertCircle, Moon, Sun, Monitor } from 'lucide-react';
 import { useTheme } from './ThemeProvider';
+import { commonClasses, radius, typography } from '../design-system';
 
 interface LoginProps {
   onStudentLogin: (user: any) => void;
@@ -36,7 +37,6 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
         throw new Error(data.detail || 'Login failed');
       }
 
-      // Save token and user type to localStorage for session persistence
       if (data.token) {
         localStorage.setItem('auth_token', data.token);
       }
@@ -86,12 +86,12 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl shadow-lg shadow-blue-500/30 mb-4">
             <ShieldCheck className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-white mb-2">NIE CR Elections</h1>
-          <p className="text-zinc-600 dark:text-zinc-400">Class Representative Voting System</p>
+          <h1 className="text-2xl font-black text-zinc-900 dark:text-white mb-2">NIE CR Elections</h1>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">Class Representative Voting System</p>
         </div>
 
         {/* Login Card */}
-        <div className="bg-white dark:bg-[#121214] rounded-2xl shadow-xl border border-zinc-200 dark:border-white/10 p-6">
+        <div className={`${commonClasses.card} shadow-xl p-6`}>
           {/* Login Type Tabs */}
           <div className="flex mb-6 p-1 bg-zinc-100 dark:bg-white/5 rounded-xl">
             <button
@@ -121,7 +121,7 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
           {/* Login Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
+              <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
                 College Email
               </label>
               <div className="relative">
@@ -131,14 +131,14 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder={loginType === 'student' ? '4ni22csa001@nie.edu.in' : 'admin@nie.edu.in'}
-                  className="w-full pl-10 pr-4 py-3 bg-white dark:bg-[#09090B] border border-zinc-200 dark:border-white/10 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`${commonClasses.input} pl-10`}
                   required
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
+              <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
                 Password
               </label>
               <div className="relative">
@@ -148,7 +148,7 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={loginType === 'student' ? 'Last 4 of USN' : 'Admin password'}
-                  className="w-full pl-10 pr-4 py-3 bg-white dark:bg-[#09090B] border border-zinc-200 dark:border-white/10 rounded-xl text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`${commonClasses.input} pl-10`}
                   required
                 />
               </div>
@@ -164,7 +164,7 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3.5 rounded-xl font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              className={`w-full ${commonClasses.buttonPrimary} py-3.5 flex items-center justify-center gap-2`}
             >
               {loading ? (
                 <>
@@ -182,7 +182,7 @@ const Login: React.FC<LoginProps> = ({ onStudentLogin, onAdminLogin }) => {
 
           {/* Help Text */}
           <div className="mt-6 p-4 bg-zinc-50 dark:bg-white/5 rounded-xl border border-zinc-200 dark:border-white/10">
-            <p className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
+            <p className="text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
               Login Credentials
             </p>
             {loginType === 'student' ? (
